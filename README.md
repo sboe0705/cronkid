@@ -21,7 +21,7 @@ This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessi
 | Command                          | Runs as        | Description                                                                 |
 |----------------------------------|----------------|-----------------------------------------------------------------------------|
 | `cronkid setup --limit <minutes>`| controlled user| Configures, enables and starts the control service for the current user.    |
-| `cronkid unsetup`                | controlled user| Stops, disables and removes the control service of the current user (keeps the used time). |
+| `cronkid remove`                 | controlled user| Stops, disables and removes the control service of the current user (keeps the used time). |
 | `cronkid reset`                  | controlled user| Resets the used time of the current user to 0.                              |
 | `cronkid update`                 | root (via sudo)| Replaces the installed script with the latest version from GitHub.          |
 | `cronkid uninstall`              | root (via sudo)| Removes the script, the control services and the used-time files of all users. |

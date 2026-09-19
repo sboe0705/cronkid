@@ -4,7 +4,7 @@
 #
 # Usage:
 #   cronkid setup --limit <minutes>   configure and start the control service for the current user
-#   cronkid unsetup                   stop and remove the control service of the current user
+#   cronkid remove                    stop and remove the control service of the current user
 #   cronkid reset                     reset the used time of the current user
 #   cronkid update                    replace this script with the latest version from the origin
 #   cronkid uninstall                 remove the script, all services and all configuration
@@ -29,7 +29,7 @@ Usage: cronkid <command> [options]
 
 Commands:
   setup --limit <minutes>   configure and start the control service for the current user
-  unsetup                   stop and remove the control service of the current user
+  remove                    stop and remove the control service of the current user
   reset                     reset the used time of the current user
   update                    replace this script with the latest version from the origin
   uninstall                 remove the script, all services and all configuration
@@ -111,7 +111,7 @@ EOF
     echo "cronkid: control service configured for user '${USER}' with a limit of ${limit} minutes"
 }
 
-cmd_unsetup() {
+cmd_remove() {
     require_non_root
     local unit
     unit="$(service_dir)/${SERVICE_NAME}"
@@ -183,7 +183,7 @@ main() {
     [[ $# -gt 0 ]] && shift
     case "$cmd" in
         setup) cmd_setup "$@" ;;
-        unsetup) cmd_unsetup "$@" ;;
+        remove) cmd_remove "$@" ;;
         reset) cmd_reset "$@" ;;
         run) cmd_run "$@" ;;
         update) cmd_update "$@" ;;

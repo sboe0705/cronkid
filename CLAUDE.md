@@ -25,7 +25,7 @@ Commands (dispatched in `main`, one `cmd_*` function each):
 - `setup --limit <minutes>` (non-root): writes `~/.config/systemd/user/cronkid.service` with
   `ExecStart=/usr/local/bin/cronkid run --limit <minutes>` and `WantedBy=default.target`, then runs
   `daemon-reload`, `enable` and `restart`. The limit is stored only in the unit file.
-- `unsetup` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
+- `remove` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
   It keeps `~/.cronkid`, so running `setup` again continues from the previous used time.
 - `reset` (non-root): writes `0` to `~/.cronkid`.
 - `run --limit <minutes>`: an internal command that the service executes and that is not listed in the usage text. It loops:
