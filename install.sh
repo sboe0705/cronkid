@@ -16,11 +16,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Branch URLs on raw.githubusercontent.com are cached for up to 5 minutes, so download from the
-# latest commit instead (falls back to the branch URL if the GitHub API is unreachable).
+# latest commit instead, read from the uncached git smart-HTTP ref advertisement (falls back to
+# the branch URL if that fails).
 # CRONKID_URL overrides the origin, e.g. for testing.
 if [[ -z ${CRONKID_URL:-} ]]; then
-    sha="$(curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github.sha" \
-        "https://api.github.com/repos/${CRONKID_REPO}/commits/${CRONKID_BRANCH}" 2>/dev/null || true)"
+    sha="$(curl -fsSL --retry 3 --connect-timeout 10 \
+        "https://github.com/${CRONKID_REPO}.git/info/refs?service=git-upload-pack" 2>/dev/null \
+        | grep -ao "[0-9a-f]\{40\} refs/heads/${CRONKID_BRANCH}\$" | head -n 1 | cut -c 1-40 || true)"
     if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
         CRONKID_URL="https://raw.githubusercontent.com/${CRONKID_REPO}/${sha}"
     else

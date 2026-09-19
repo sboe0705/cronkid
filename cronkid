@@ -74,17 +74,18 @@ write_used() {
 }
 
 # Prints the base URL to download from. raw.githubusercontent.com caches branch URLs for up to
-# 5 minutes, so the latest commit of the branch is resolved via the GitHub API and its immutable
-# URL is used. Falls back to the (possibly stale) branch URL if the API is unreachable.
-# CRONKID_URL overrides the origin, e.g. for testing.
+# 5 minutes (and the GitHub API for 60 seconds), so the latest commit of the branch is read from
+# the uncached git smart-HTTP ref advertisement and its immutable URL is used. Falls back to the
+# (possibly stale) branch URL if that fails. CRONKID_URL overrides the origin, e.g. for testing.
 origin_url() {
     if [[ -n ${CRONKID_URL:-} ]]; then
         echo "$CRONKID_URL"
         return
     fi
     local sha
-    sha="$(curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github.sha" \
-        "https://api.github.com/repos/${CRONKID_REPO}/commits/${CRONKID_BRANCH}" 2>/dev/null || true)"
+    sha="$(curl -fsSL --retry 3 --connect-timeout 10 \
+        "https://github.com/${CRONKID_REPO}.git/info/refs?service=git-upload-pack" 2>/dev/null \
+        | grep -ao "[0-9a-f]\{40\} refs/heads/${CRONKID_BRANCH}\$" | head -n 1 | cut -c 1-40 || true)"
     if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
         echo "https://raw.githubusercontent.com/${CRONKID_REPO}/${sha}"
     else

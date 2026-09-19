@@ -15,11 +15,11 @@ The used time is stored on disk, so it survives reboots. See `README.md` for use
 - `README.md`: user documentation. `LICENSE`: MIT.
 
 Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH`). Branch URLs on
-`raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). So the scripts first
-resolve the latest commit ID through `api.github.com/repos/<repo>/commits/<branch>` (header
-`Accept: application/vnd.github.sha`) and download from the immutable `raw.githubusercontent.com/<repo>/<sha>/`
-URL. If the API is unreachable, for example because of the rate limit of 60 requests per hour without
-authentication, they fall back to the branch URL. In `cronkid` this lives in `origin_url`. Setting
+`raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). The GitHub REST API is also cached, for 60 seconds, and is limited to 60 requests per hour
+without authentication. So the scripts read the latest commit ID from the uncached git smart-HTTP
+endpoint `https://github.com/<repo>.git/info/refs?service=git-upload-pack` with plain `curl` (`git` is
+not required) and download from the immutable `raw.githubusercontent.com/<repo>/<sha>/` URL. If that
+fails, they fall back to the branch URL. In `cronkid` this lives in `origin_url`. Setting
 `CRONKID_URL` in the environment overrides the origin, for example `file://` for tests. The installed script
 only changes after a push to `main` followed by `cronkid update`.
 
