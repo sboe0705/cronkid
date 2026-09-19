@@ -12,7 +12,8 @@
 #
 set -euo pipefail
 
-CRONKID_URL="${CRONKID_URL:-https://raw.githubusercontent.com/sboe0705/cronkid/main}"
+CRONKID_REPO="sboe0705/cronkid"
+CRONKID_BRANCH="main"
 INSTALL_PATH="/usr/local/bin/cronkid"
 SERVICE_NAME="cronkid.service"
 USED_FILE_NAME=".cronkid"
@@ -70,6 +71,26 @@ write_used() {
     file="$(used_file)"
     echo "$(date +%F) $1" >"${file}.tmp"
     mv -f "${file}.tmp" "$file"
+}
+
+# Prints the base URL to download from. raw.githubusercontent.com caches branch URLs for up to
+# 5 minutes, so the latest commit of the branch is resolved via the GitHub API and its immutable
+# URL is used. Falls back to the (possibly stale) branch URL if the API is unreachable.
+# CRONKID_URL overrides the origin, e.g. for testing.
+origin_url() {
+    if [[ -n ${CRONKID_URL:-} ]]; then
+        echo "$CRONKID_URL"
+        return
+    fi
+    local sha
+    sha="$(curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github.sha" \
+        "https://api.github.com/repos/${CRONKID_REPO}/commits/${CRONKID_BRANCH}" 2>/dev/null || true)"
+    if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+        echo "https://raw.githubusercontent.com/${CRONKID_REPO}/${sha}"
+    else
+        echo "cronkid: cannot resolve latest commit, falling back to branch '${CRONKID_BRANCH}' (may be up to 5 minutes old)" >&2
+        echo "https://raw.githubusercontent.com/${CRONKID_REPO}/${CRONKID_BRANCH}"
+    fi
 }
 
 service_dir() {
@@ -176,7 +197,9 @@ cmd_run() {
 # script keeps reading the old file, and a failed or invalid download leaves the current version intact.
 cmd_update() {
     require_root update
-    local url="${CRONKID_URL}/cronkid" tmp
+    local base url tmp
+    base="$(origin_url)"
+    url="${base}/cronkid"
     tmp="$(mktemp "${INSTALL_PATH}.XXXXXX")" || die "cannot create temporary file next to ${INSTALL_PATH}"
     # The value is expanded now, because the trap runs after this function's locals are gone.
     trap "rm -f -- $(printf '%q' "$tmp")" EXIT
@@ -191,7 +214,7 @@ cmd_update() {
     fi
     chmod 0755 "$tmp"
     mv -f "$tmp" "$INSTALL_PATH" || die "cannot replace ${INSTALL_PATH}, keeping current version"
-    echo "cronkid: updated ${INSTALL_PATH} from ${CRONKID_URL}"
+    echo "cronkid: updated ${INSTALL_PATH} from ${base}"
 }
 
 cmd_uninstall() {

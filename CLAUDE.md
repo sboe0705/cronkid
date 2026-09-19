@@ -14,9 +14,14 @@ The used time is stored on disk, so it survives reboots. See `README.md` for use
   `cronkid` from `CRONKID_URL` and installs it.
 - `README.md`: user documentation. `LICENSE`: MIT.
 
-Both scripts download from `CRONKID_URL`, which defaults to
-`https://raw.githubusercontent.com/sboe0705/cronkid/main` and can be overridden through the environment.
-The installed script therefore only changes after a push to `main` followed by `cronkid update`.
+Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH`). Branch URLs on
+`raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). So the scripts first
+resolve the latest commit ID through `api.github.com/repos/<repo>/commits/<branch>` (header
+`Accept: application/vnd.github.sha`) and download from the immutable `raw.githubusercontent.com/<repo>/<sha>/`
+URL. If the API is unreachable, for example because of the rate limit of 60 requests per hour without
+authentication, they fall back to the branch URL. In `cronkid` this lives in `origin_url`. Setting
+`CRONKID_URL` in the environment overrides the origin, for example `file://` for tests. The installed script
+only changes after a push to `main` followed by `cronkid update`.
 
 ## Current state of `cronkid`
 
@@ -34,7 +39,7 @@ Commands (dispatched in `main`, one `cmd_*` function each):
 - `run --limit <minutes>`: an internal command that the service executes and that is not listed in the usage text. It loops:
   if used >= limit it calls `loginctl terminate-user "$USER"`, then sleeps `TICK_SECONDS` (60) and adds 1.
   It re-reads `~/.cronkid` on every tick, so `reset` takes effect while the service runs.
-- `update` (root, auto-sudo): downloads `cronkid` (with retries) into a temp file next to
+- `update` (root, auto-sudo): downloads `cronkid` from `origin_url`, with retries, into a temp file next to
   `/usr/local/bin/cronkid`. It checks that the file starts with `#!` and passes `bash -n`, skips the
   update if the file is identical, then does `chmod 0755` and an atomic `mv`. Any failure keeps the
   current version. The temp file stays in the same directory so that the rename is atomic, the
