@@ -21,21 +21,24 @@ This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessi
 | Command                          | Runs as        | Description                                                                 |
 |----------------------------------|----------------|-----------------------------------------------------------------------------|
 | `cronkid setup --limit <minutes>`| controlled user| Configures, enables and starts the control service for the current user.    |
+| `cronkid setup --limit <minutes> --user <username>` | root (via sudo) | Configures and enables the control service for the given user. It starts immediately if the user is logged in, otherwise at their next login. |
 | `cronkid remove`                 | controlled user| Stops, disables and removes the control service of the current user (keeps the used time). |
 | `cronkid status`                 | controlled user| Shows the remaining, used and allowed minutes of the current user for today. |
 | `cronkid reset`                  | controlled user| Resets the used time of the current user to 0.                              |
 | `cronkid update`                 | root (via sudo)| Replaces the installed script with the latest version from GitHub.          |
 | `cronkid uninstall`              | root (via sudo)| Removes the script, the control services and the used-time files of all users. |
 
-`update` and `uninstall` call `sudo` automatically when run by a regular user.
+`update`, `uninstall` and `setup --user` call `sudo` automatically when run by a regular user.
 
 ### Example
 
-Log in as the child's user (or `su - <child>`) and run:
+As a parent with sudo rights, set up a limit of 2 hours for the user `kid`:
 
 ```bash
-cronkid setup --limit 120
+cronkid setup --limit 120 --user kid
 ```
+
+Or log in as the child's user and run `cronkid setup --limit 120`.
 
 Running `setup` again with another limit replaces the previous configuration.
 

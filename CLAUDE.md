@@ -27,9 +27,17 @@ only changes after a push to `main` followed by `cronkid update`.
 
 Commands (dispatched in `main`, one `cmd_*` function each):
 
-- `setup --limit <minutes>` (non-root): writes `~/.config/systemd/user/cronkid.service` with
-  `ExecStart=/usr/local/bin/cronkid run --limit <minutes>` and `WantedBy=default.target`, then runs
-  `daemon-reload`, `enable` and `restart`. The limit is stored only in the unit file.
+- `setup --limit <minutes> [--user <name>]`: the unit text comes from `service_unit`
+  (`ExecStart=/usr/local/bin/cronkid run --limit <minutes>`, `WantedBy=default.target`). The limit is
+  stored only in the unit file.
+  - Without `--user`, or with `--user` set to yourself: `setup_current_user` (non-root) writes the unit and
+    runs `systemctl --user daemon-reload`, `enable` and `restart`.
+  - With `--user` set to another user: the command re-runs itself through sudo and calls
+    `setup_other_user`. It refuses uid 0 and needs an existing home directory. It creates the unit and the
+    `default.target.wants` symlink as the target user via `runuser`, so the files are owned by that user and
+    root never follows paths the user controls. If `user@<uid>.service` is active, it runs `daemon-reload`
+    and `restart` through `systemctl --user --machine=<user>@`. Otherwise the service starts at the next
+    login. It always writes to `~/.config`; `XDG_CONFIG_HOME` is not considered.
 - `remove` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
   It keeps `~/.cronkid`, so running `setup` again continues from the previous used time.
 - `status` (non-root): prints the remaining minutes as limit minus today's used time, floored at 0.

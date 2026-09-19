@@ -3,7 +3,9 @@
 # cronkid - shell-based parental control that limits the usage time of a user.
 #
 # Usage:
-#   cronkid setup --limit <minutes>   configure and start the control service for the current user
+#   cronkid setup --limit <minutes> [--user <username>]
+#                                     configure and start the control service for the current
+#                                     or the given user
 #   cronkid remove                    stop and remove the control service of the current user
 #   cronkid status                    show the remaining time of the current user
 #   cronkid reset                     reset the used time of the current user
@@ -30,7 +32,9 @@ usage() {
 Usage: cronkid <command> [options]
 
 Commands:
-  setup --limit <minutes>   configure and start the control service for the current user
+  setup --limit <minutes> [--user <username>]
+                            configure and start the control service for the current user,
+                            or for the given user (requires root, uses sudo)
   remove                    stop and remove the control service of the current user
   status                    show the remaining time of the current user
   reset                     reset the used time of the current user
@@ -98,14 +102,29 @@ service_dir() {
     echo "${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 }
 
+# Prints the service unit that enforces the given limit.
+service_unit() {
+    cat <<EOF
+[Unit]
+Description=cronkid usage time control (limit: ${1} minutes)
+
+[Service]
+Type=simple
+ExecStart=${INSTALL_PATH} run --limit ${1}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
 cmd_setup() {
-    require_non_root
-    local limit=""
+    local args=("$@") limit="" user=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --limit)
-                [[ $# -ge 2 ]] || die "--limit requires a value"
-                limit="$2"
+            --limit | --user)
+                [[ $# -ge 2 ]] || die "$1 requires a value"
+                if [[ $1 == --limit ]]; then limit="$2"; else user="$2"; fi
                 shift 2
                 ;;
             *) die "unknown option for setup: $1" ;;
@@ -114,26 +133,51 @@ cmd_setup() {
     [[ -n $limit ]] || die "setup requires --limit <minutes>"
     [[ $limit =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive number of minutes"
 
-    local dir
+    if [[ -z $user || ($EUID -ne 0 && $user == "$USER") ]]; then
+        setup_current_user "$limit"
+    else
+        getent passwd "$user" >/dev/null || die "unknown user: ${user}"
+        require_root setup "${args[@]}"
+        setup_other_user "$limit" "$user"
+    fi
+}
+
+setup_current_user() {
+    require_non_root
+    local limit="$1" dir
     dir="$(service_dir)"
     mkdir -p "$dir"
-    cat >"${dir}/${SERVICE_NAME}" <<EOF
-[Unit]
-Description=cronkid usage time control (limit: ${limit} minutes)
-
-[Service]
-Type=simple
-ExecStart=${INSTALL_PATH} run --limit ${limit}
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-EOF
+    service_unit "$limit" >"${dir}/${SERVICE_NAME}"
 
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME"
     systemctl --user restart "$SERVICE_NAME"
     echo "cronkid: control service configured for user '${USER}' with a limit of ${limit} minutes"
+}
+
+# Runs as root. All files are created as the target user (runuser), so they are owned by that user
+# and root never writes through paths the user controls. Enabling is done by creating the same
+# symlink as 'systemctl --user enable', which also works while the user is logged out.
+setup_other_user() {
+    local limit="$1" user="$2" uid home
+    uid="$(id -u "$user")"
+    [[ $uid -ne 0 ]] || die "the root user cannot be controlled"
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -d $home ]] || die "home directory of user '${user}' not found: ${home}"
+
+    local dir="${home}/.config/systemd/user"
+    runuser -u "$user" -- mkdir -p "${dir}/default.target.wants"
+    service_unit "$limit" | runuser -u "$user" -- tee "${dir}/${SERVICE_NAME}" >/dev/null
+    runuser -u "$user" -- ln -sfn "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
+
+    if systemctl is-active --quiet "user@${uid}.service"; then
+        systemctl --user --machine="${user}@" daemon-reload
+        systemctl --user --machine="${user}@" restart "$SERVICE_NAME"
+        echo "cronkid: control service configured and started for user '${user}' with a limit of ${limit} minutes"
+    else
+        echo "cronkid: control service configured for user '${user}' with a limit of ${limit} minutes" \
+            "(starts at the user's next login)"
+    fi
 }
 
 cmd_remove() {
