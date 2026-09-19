@@ -6,9 +6,9 @@
 #   cronkid setup --limit <minutes> [--user <username>]
 #                                     configure and start the control service for the current
 #                                     or the given user
-#   cronkid remove                    stop and remove the control service of the current user
-#   cronkid status                    show the remaining time of the current user
-#   cronkid reset                     reset the used time of the current user
+#   cronkid remove [--user <username>]  stop and remove the control service
+#   cronkid status [--user <username>]  show the remaining time
+#   cronkid reset [--user <username>]   reset the used time
 #   cronkid update                    replace this script with the latest version from the origin
 #   cronkid uninstall                 remove the script, all services and all configuration
 #
@@ -33,13 +33,18 @@ Usage: cronkid <command> [options]
 
 Commands:
   setup --limit <minutes> [--user <username>]
-                            configure and start the control service for the current user,
-                            or for the given user (requires root, uses sudo)
-  remove                    stop and remove the control service of the current user
-  status                    show the remaining time of the current user
-  reset                     reset the used time of the current user
+                            configure and start the control service
+  remove [--user <username>]
+                            stop and remove the control service
+  status [--user <username>]
+                            show the remaining time
+  reset [--user <username>]
+                            reset the used time
   update                    replace this script with the latest version from the origin
   uninstall                 remove the script, all services and all configuration
+
+Without --user, a command applies to the current user. With --user it applies to the given
+user and requires root (sudo is used automatically).
 EOF
 }
 
@@ -118,6 +123,51 @@ WantedBy=default.target
 EOF
 }
 
+# Parses the "[--user <name>]" option of a command into USER_OPTION.
+parse_user_option() {
+    local cmd="$1"
+    shift
+    USER_OPTION=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user)
+                [[ $# -ge 2 ]] || die "--user requires a value"
+                USER_OPTION="$2"
+                shift 2
+                ;;
+            *) die "unknown option for ${cmd}: $1" ;;
+        esac
+    done
+}
+
+# Usage: for_other_user <user> <command> <original args...>
+# Returns 1 if the command targets the current user (no user given, or the given user is oneself).
+# Otherwise validates the user, re-executes the command via sudo if needed and returns 0 as root
+# with TARGET_USER, TARGET_UID and TARGET_HOME set.
+for_other_user() {
+    local user="$1"
+    shift
+    [[ -n $user ]] || return 1
+    [[ $EUID -ne 0 && $user == "$USER" ]] && return 1
+    getent passwd "$user" >/dev/null || die "unknown user: ${user}"
+    require_root "$@"
+    TARGET_USER="$user"
+    TARGET_UID="$(id -u "$user")"
+    [[ $TARGET_UID -ne 0 ]] || die "the root user cannot be controlled"
+    TARGET_HOME="$(getent passwd "$user" | cut -d: -f6)"
+    [[ -d $TARGET_HOME ]] || die "home directory of user '${user}' not found: ${TARGET_HOME}"
+}
+
+# Runs a cronkid command as the target user, so that root never reads or writes the user's files.
+run_as_target() {
+    runuser -u "$TARGET_USER" -- env -u XDG_CONFIG_HOME HOME="$TARGET_HOME" USER="$TARGET_USER" \
+        LOGNAME="$TARGET_USER" "$(readlink -f "$0")" "$@"
+}
+
+target_user_manager_active() {
+    systemctl is-active --quiet "user@${TARGET_UID}.service"
+}
+
 cmd_setup() {
     local args=("$@") limit="" user=""
     while [[ $# -gt 0 ]]; do
@@ -133,12 +183,10 @@ cmd_setup() {
     [[ -n $limit ]] || die "setup requires --limit <minutes>"
     [[ $limit =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive number of minutes"
 
-    if [[ -z $user || ($EUID -ne 0 && $user == "$USER") ]]; then
-        setup_current_user "$limit"
+    if for_other_user "$user" setup "${args[@]}"; then
+        setup_other_user "$limit"
     else
-        getent passwd "$user" >/dev/null || die "unknown user: ${user}"
-        require_root setup "${args[@]}"
-        setup_other_user "$limit" "$user"
+        setup_current_user "$limit"
     fi
 }
 
@@ -159,28 +207,28 @@ setup_current_user() {
 # and root never writes through paths the user controls. Enabling is done by creating the same
 # symlink as 'systemctl --user enable', which also works while the user is logged out.
 setup_other_user() {
-    local limit="$1" user="$2" uid home
-    uid="$(id -u "$user")"
-    [[ $uid -ne 0 ]] || die "the root user cannot be controlled"
-    home="$(getent passwd "$user" | cut -d: -f6)"
-    [[ -d $home ]] || die "home directory of user '${user}' not found: ${home}"
+    local limit="$1" dir="${TARGET_HOME}/.config/systemd/user"
+    runuser -u "$TARGET_USER" -- mkdir -p "${dir}/default.target.wants"
+    service_unit "$limit" | runuser -u "$TARGET_USER" -- tee "${dir}/${SERVICE_NAME}" >/dev/null
+    runuser -u "$TARGET_USER" -- ln -sfn "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
 
-    local dir="${home}/.config/systemd/user"
-    runuser -u "$user" -- mkdir -p "${dir}/default.target.wants"
-    service_unit "$limit" | runuser -u "$user" -- tee "${dir}/${SERVICE_NAME}" >/dev/null
-    runuser -u "$user" -- ln -sfn "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
-
-    if systemctl is-active --quiet "user@${uid}.service"; then
-        systemctl --user --machine="${user}@" daemon-reload
-        systemctl --user --machine="${user}@" restart "$SERVICE_NAME"
-        echo "cronkid: control service configured and started for user '${user}' with a limit of ${limit} minutes"
+    if target_user_manager_active; then
+        systemctl --user --machine="${TARGET_USER}@" daemon-reload
+        systemctl --user --machine="${TARGET_USER}@" restart "$SERVICE_NAME"
+        echo "cronkid: control service configured and started for user '${TARGET_USER}'" \
+            "with a limit of ${limit} minutes"
     else
-        echo "cronkid: control service configured for user '${user}' with a limit of ${limit} minutes" \
+        echo "cronkid: control service configured for user '${TARGET_USER}' with a limit of ${limit} minutes" \
             "(starts at the user's next login)"
     fi
 }
 
 cmd_remove() {
+    parse_user_option remove "$@"
+    if for_other_user "$USER_OPTION" remove "$@"; then
+        remove_other_user
+        return
+    fi
     require_non_root
     local unit
     unit="$(service_dir)/${SERVICE_NAME}"
@@ -191,6 +239,21 @@ cmd_remove() {
     echo "cronkid: control service of user '${USER}' removed"
 }
 
+# Runs as root. Stops the service if the user is logged in and deletes the unit and its
+# 'default.target.wants' symlink as the target user. The used time is kept.
+remove_other_user() {
+    local dir="${TARGET_HOME}/.config/systemd/user"
+    [[ -f ${dir}/${SERVICE_NAME} ]] || die "no control service configured for user '${TARGET_USER}'"
+    if target_user_manager_active; then
+        systemctl --user --machine="${TARGET_USER}@" stop "$SERVICE_NAME" || true
+    fi
+    runuser -u "$TARGET_USER" -- rm -f "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
+    if target_user_manager_active; then
+        systemctl --user --machine="${TARGET_USER}@" daemon-reload || true
+    fi
+    echo "cronkid: control service of user '${TARGET_USER}' removed"
+}
+
 # Prints the limit in minutes configured in the user's service, or nothing if there is none.
 read_limit() {
     local unit
@@ -199,6 +262,11 @@ read_limit() {
 }
 
 cmd_status() {
+    parse_user_option status "$@"
+    if for_other_user "$USER_OPTION" status "$@"; then
+        run_as_target status
+        return
+    fi
     require_non_root
     local limit used
     limit="$(read_limit)"
@@ -208,10 +276,15 @@ cmd_status() {
         return
     fi
     local remaining=$((limit > used ? limit - used : 0))
-    echo "Remaining time: ${remaining} minutes (used ${used} of ${limit} minutes today)"
+    echo "Remaining time of user '${USER}': ${remaining} minutes (used ${used} of ${limit} minutes today)"
 }
 
 cmd_reset() {
+    parse_user_option reset "$@"
+    if for_other_user "$USER_OPTION" reset "$@"; then
+        run_as_target reset
+        return
+    fi
     require_non_root
     write_used 0
     echo "cronkid: used time of user '${USER}' reset"

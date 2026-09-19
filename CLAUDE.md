@@ -27,23 +27,32 @@ only changes after a push to `main` followed by `cronkid update`.
 
 Commands (dispatched in `main`, one `cmd_*` function each):
 
+`--user <name>` (setup, remove, status, reset): `for_other_user` returns 1 when no user was given, or when
+the given user is the non-root caller. In that case the command runs for the current user as non-root
+(`require_non_root`). Otherwise it checks that the user exists, re-runs itself through sudo (`require_root`),
+refuses uid 0 and requires the home directory. It then sets `TARGET_USER`, `TARGET_UID` and `TARGET_HOME`.
+remove, status and reset parse their options with `parse_user_option`, which sets `USER_OPTION`; setup
+parses its own. As root, the user's files are never accessed directly. They are touched only via
+`runuser -u <user>`, so the files end up owned by that user and root never follows symlinks the user
+controls. The service is controlled via `systemctl --user --machine=<user>@`, and only if
+`user@<uid>.service` is active. For other users the scripts always use `~/.config`, ignoring
+`XDG_CONFIG_HOME`.
+
 - `setup --limit <minutes> [--user <name>]`: the unit text comes from `service_unit`
   (`ExecStart=/usr/local/bin/cronkid run --limit <minutes>`, `WantedBy=default.target`). The limit is
-  stored only in the unit file.
-  - Without `--user`, or with `--user` set to yourself: `setup_current_user` (non-root) writes the unit and
-    runs `systemctl --user daemon-reload`, `enable` and `restart`.
-  - With `--user` set to another user: the command re-runs itself through sudo and calls
-    `setup_other_user`. It refuses uid 0 and needs an existing home directory. It creates the unit and the
-    `default.target.wants` symlink as the target user via `runuser`, so the files are owned by that user and
-    root never follows paths the user controls. If `user@<uid>.service` is active, it runs `daemon-reload`
-    and `restart` through `systemctl --user --machine=<user>@`. Otherwise the service starts at the next
-    login. It always writes to `~/.config`; `XDG_CONFIG_HOME` is not considered.
-- `remove` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
-  It keeps `~/.cronkid`, so running `setup` again continues from the previous used time.
-- `status` (non-root): prints the remaining minutes as limit minus today's used time, floored at 0.
+  stored only in the unit file. `setup_current_user` runs `systemctl --user daemon-reload`, `enable` and
+  `restart`. `setup_other_user` creates the unit and the `default.target.wants` symlink via `runuser`, and
+  runs `daemon-reload` and `restart` if the user is logged in. Otherwise the service starts at the next login.
+- `remove [--user <name>]`: for the current user it runs `disable --now`, deletes the unit and runs
+  `daemon-reload`. `remove_other_user` stops the service if the user is logged in, deletes the unit and
+  symlink via `runuser`, then runs `daemon-reload`. Both keep `~/.cronkid`, so running `setup` again
+  continues from the previous used time.
+- `status [--user <name>]`: prints the remaining minutes as limit minus today's used time, floored at 0.
   The limit comes from `read_limit`, which parses `--limit N` from the unit's `ExecStart=`. Without a
-  unit file it reports that no service is configured.
-- `reset` (non-root): writes today's date with `0` to `~/.cronkid`.
+  unit file it reports that no service is configured. For another user it re-runs itself as that user
+  through `run_as_target`, which calls `runuser` with `HOME`, `USER` and `LOGNAME` set and `XDG_CONFIG_HOME`
+  unset.
+- `reset [--user <name>]`: writes today's date with `0` to `~/.cronkid`. For another user it uses `run_as_target`.
 - `run --limit <minutes>`: an internal command that the service executes and that is not listed in the usage text. It loops:
   if used >= limit it calls `loginctl terminate-user "$USER"`, then sleeps `TICK_SECONDS` (60) and adds 1.
   It re-reads `~/.cronkid` on every tick, so `reset` takes effect while the service runs.
