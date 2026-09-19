@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+#
+# cronkid - shell-based parental control that limits the usage time of a user.
+#
+# Usage:
+#   cronkid setup --limit <minutes>   configure and start the control service for the current user
+#   cronkid unsetup                   stop and remove the control service of the current user
+#   cronkid reset                     reset the used time of the current user
+#   cronkid update                    replace this script with the latest version from the origin
+#   cronkid uninstall                 remove the script, all services and all configuration
+#
+set -euo pipefail
+
+CRONKID_URL="${CRONKID_URL:-https://raw.githubusercontent.com/sboe0705/cronkid/main}"
+INSTALL_PATH="/usr/local/bin/cronkid"
+SERVICE_NAME="cronkid.service"
+USED_FILE_NAME=".cronkid"
+# Seconds between two checks of the control service; each check adds one minute of used time.
+TICK_SECONDS=60
+
+die() {
+    echo "cronkid: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<EOF
+Usage: cronkid <command> [options]
+
+Commands:
+  setup --limit <minutes>   configure and start the control service for the current user
+  unsetup                   stop and remove the control service of the current user
+  reset                     reset the used time of the current user
+  update                    replace this script with the latest version from the origin
+  uninstall                 remove the script, all services and all configuration
+EOF
+}
+
+# Re-executes the current command as root via sudo, unless already running as root.
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        exec sudo "$(readlink -f "$0")" "$@"
+    fi
+}
+
+require_non_root() {
+    if [[ $EUID -eq 0 ]]; then
+        die "this command must be run as the user to be controlled, not as root"
+    fi
+}
+
+used_file() {
+    echo "${HOME}/${USED_FILE_NAME}"
+}
+
+# Prints the used minutes of the current user (0 if nothing was recorded yet).
+read_used() {
+    local file used
+    file="$(used_file)"
+    used="$(cat "$file" 2>/dev/null || true)"
+    [[ $used =~ ^[0-9]+$ ]] || used=0
+    echo "$used"
+}
+
+write_used() {
+    local file
+    file="$(used_file)"
+    echo "$1" >"${file}.tmp"
+    mv -f "${file}.tmp" "$file"
+}
+
+service_dir() {
+    echo "${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+}
+
+cmd_setup() {
+    require_non_root
+    local limit=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --limit)
+                [[ $# -ge 2 ]] || die "--limit requires a value"
+                limit="$2"
+                shift 2
+                ;;
+            *) die "unknown option for setup: $1" ;;
+        esac
+    done
+    [[ -n $limit ]] || die "setup requires --limit <minutes>"
+    [[ $limit =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive number of minutes"
+
+    local dir
+    dir="$(service_dir)"
+    mkdir -p "$dir"
+    cat >"${dir}/${SERVICE_NAME}" <<EOF
+[Unit]
+Description=cronkid usage time control (limit: ${limit} minutes)
+
+[Service]
+Type=simple
+ExecStart=${INSTALL_PATH} run --limit ${limit}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+    systemctl --user restart "$SERVICE_NAME"
+    echo "cronkid: control service configured for user '${USER}' with a limit of ${limit} minutes"
+}
+
+cmd_unsetup() {
+    require_non_root
+    local unit
+    unit="$(service_dir)/${SERVICE_NAME}"
+    [[ -f $unit ]] || die "no control service configured for user '${USER}'"
+    systemctl --user disable --now "$SERVICE_NAME"
+    rm -f "$unit"
+    systemctl --user daemon-reload
+    echo "cronkid: control service of user '${USER}' removed"
+}
+
+cmd_reset() {
+    require_non_root
+    write_used 0
+    echo "cronkid: used time of user '${USER}' reset"
+}
+
+# Internal command executed by the control service: counts the used minutes and
+# terminates all sessions of the user as soon as the limit is reached.
+cmd_run() {
+    local limit=""
+    if [[ ${1:-} == "--limit" && -n ${2:-} ]]; then
+        limit="$2"
+    fi
+    [[ $limit =~ ^[1-9][0-9]*$ ]] || die "run requires --limit <minutes>"
+
+    while true; do
+        local used
+        used="$(read_used)"
+        if ((used >= limit)); then
+            echo "cronkid: limit of ${limit} minutes reached, terminating sessions of user '${USER}'"
+            loginctl terminate-user "$USER"
+        fi
+        sleep "$TICK_SECONDS"
+        write_used $(($(read_used) + 1))
+    done
+}
+
+cmd_update() {
+    require_root update
+    local tmp
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    curl -fsSL "${CRONKID_URL}/cronkid" -o "$tmp" || die "download from ${CRONKID_URL}/cronkid failed"
+    bash -n "$tmp" || die "downloaded script is not valid bash, keeping current version"
+    install -m 0755 "$tmp" "$INSTALL_PATH"
+    echo "cronkid: updated ${INSTALL_PATH} from ${CRONKID_URL}"
+}
+
+cmd_uninstall() {
+    require_root uninstall
+    local name uid home
+    while IFS=: read -r name _ uid _ _ home _; do
+        [[ -d $home ]] || continue
+        local unit="${home}/.config/systemd/user/${SERVICE_NAME}"
+        if [[ -f $unit ]]; then
+            systemctl --user --machine="${name}@" stop "$SERVICE_NAME" 2>/dev/null || true
+            rm -f "$unit" "${home}/.config/systemd/user/default.target.wants/${SERVICE_NAME}"
+            systemctl --user --machine="${name}@" daemon-reload 2>/dev/null || true
+            echo "cronkid: removed control service of user '${name}'"
+        fi
+        rm -f "${home}/${USED_FILE_NAME}" "${home}/${USED_FILE_NAME}.tmp"
+    done < <(getent passwd)
+    rm -f "$INSTALL_PATH"
+    echo "cronkid: uninstalled"
+}
+
+main() {
+    local cmd="${1:-}"
+    [[ $# -gt 0 ]] && shift
+    case "$cmd" in
+        setup) cmd_setup "$@" ;;
+        unsetup) cmd_unsetup "$@" ;;
+        reset) cmd_reset "$@" ;;
+        run) cmd_run "$@" ;;
+        update) cmd_update "$@" ;;
+        uninstall) cmd_uninstall "$@" ;;
+        -h | --help | help) usage ;;
+        "") usage >&2; exit 1 ;;
+        *) echo "cronkid: unknown command: $cmd" >&2; usage >&2; exit 1 ;;
+    esac
+}
+
+main "$@"
