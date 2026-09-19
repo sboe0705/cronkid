@@ -150,14 +150,25 @@ cmd_run() {
     done
 }
 
+# Downloads the latest script next to the installed one and atomically replaces it. The running
+# script keeps reading the old file, and a failed or invalid download leaves the current version intact.
 cmd_update() {
     require_root update
-    local tmp
-    tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' EXIT
-    curl -fsSL "${CRONKID_URL}/cronkid" -o "$tmp" || die "download from ${CRONKID_URL}/cronkid failed"
+    local url="${CRONKID_URL}/cronkid" tmp
+    tmp="$(mktemp "${INSTALL_PATH}.XXXXXX")" || die "cannot create temporary file next to ${INSTALL_PATH}"
+    # The value is expanded now, because the trap runs after this function's locals are gone.
+    trap "rm -f -- $(printf '%q' "$tmp")" EXIT
+
+    curl -fsSL --retry 3 --connect-timeout 10 "$url" -o "$tmp" \
+        || die "download from ${url} failed, keeping current version"
+    [[ $(head -c 2 "$tmp") == "#!" ]] || die "downloaded file is not a script, keeping current version"
     bash -n "$tmp" || die "downloaded script is not valid bash, keeping current version"
-    install -m 0755 "$tmp" "$INSTALL_PATH"
+    if cmp -s "$tmp" "$INSTALL_PATH"; then
+        echo "cronkid: ${INSTALL_PATH} is already up to date"
+        return
+    fi
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$INSTALL_PATH" || die "cannot replace ${INSTALL_PATH}, keeping current version"
     echo "cronkid: updated ${INSTALL_PATH} from ${CRONKID_URL}"
 }
 
