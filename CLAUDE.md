@@ -27,7 +27,7 @@ Commands (dispatched in `main`, one `cmd_*` function each):
   `daemon-reload`, `enable` and `restart`. The limit is stored only in the unit file.
 - `remove` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
   It keeps `~/.cronkid`, so running `setup` again continues from the previous used time.
-- `reset` (non-root): writes `0` to `~/.cronkid`.
+- `reset` (non-root): writes today's date with `0` to `~/.cronkid`.
 - `run --limit <minutes>`: an internal command that the service executes and that is not listed in the usage text. It loops:
   if used >= limit it calls `loginctl terminate-user "$USER"`, then sleeps `TICK_SECONDS` (60) and adds 1.
   It re-reads `~/.cronkid` on every tick, so `reset` takes effect while the service runs.
@@ -36,8 +36,10 @@ Commands (dispatched in `main`, one `cmd_*` function each):
   user unit, including its `default.target.wants` symlink, and removes `~/.cronkid`. Then deletes
   `/usr/local/bin/cronkid`.
 
-State: `~/.cronkid` holds a plain integer, the used minutes. It is written atomically (tmp file + `mv`).
-There is no automatic daily reset and no warning before logout.
+State: `~/.cronkid` holds `<YYYY-MM-DD> <minutes>` and is written atomically (tmp file + `mv`).
+`read_used` returns 0 when the stored date is not today, which gives the daily reset. There is no
+separate job for it, and it works across reboots and while the service runs past midnight. A file in the
+old plain-integer format is read as 0. There is no warning before logout.
 
 ## Workflow
 

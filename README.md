@@ -44,15 +44,15 @@ Running `setup` again with another limit replaces the previous configuration.
   for `default.target`. The service starts automatically when the user logs in and stops when their last
   session ends.
 - Once a minute the service adds one minute to the used time, stored in the hidden file `~/.cronkid`
-  (the file holds a plain number of minutes).
+  as `<date> <minutes>` (e.g. `2026-09-19 42`).
 - When the used time reaches the limit, the service ends all sessions of the user
   (`loginctl terminate-user`). If the limit is already reached at login, the user is logged out
   right after logging in.
-- The used time is **not** reset automatically. Use `cronkid reset` to reset it.
+- The used time is reset automatically every day at midnight: minutes recorded on an earlier date
+  count as 0, also after a reboot or while the user is logged in. `cronkid reset` resets it manually.
 
 ## Known limitations
 
-- The used time is only reset manually via `cronkid reset`. There is no daily reset yet.
 - There is no warning before the user is logged out.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
   service, run `cronkid reset` or edit the file.
