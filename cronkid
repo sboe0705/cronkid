@@ -5,6 +5,7 @@
 # Usage:
 #   cronkid setup --limit <minutes>   configure and start the control service for the current user
 #   cronkid remove                    stop and remove the control service of the current user
+#   cronkid status                    show the remaining time of the current user
 #   cronkid reset                     reset the used time of the current user
 #   cronkid update                    replace this script with the latest version from the origin
 #   cronkid uninstall                 remove the script, all services and all configuration
@@ -30,6 +31,7 @@ Usage: cronkid <command> [options]
 Commands:
   setup --limit <minutes>   configure and start the control service for the current user
   remove                    stop and remove the control service of the current user
+  status                    show the remaining time of the current user
   reset                     reset the used time of the current user
   update                    replace this script with the latest version from the origin
   uninstall                 remove the script, all services and all configuration
@@ -123,6 +125,26 @@ cmd_remove() {
     echo "cronkid: control service of user '${USER}' removed"
 }
 
+# Prints the limit in minutes configured in the user's service, or nothing if there is none.
+read_limit() {
+    local unit
+    unit="$(service_dir)/${SERVICE_NAME}"
+    sed -n 's/^ExecStart=.* --limit \([0-9][0-9]*\)$/\1/p' "$unit" 2>/dev/null | head -n 1 || true
+}
+
+cmd_status() {
+    require_non_root
+    local limit used
+    limit="$(read_limit)"
+    used="$(read_used)"
+    if [[ -z $limit ]]; then
+        echo "cronkid: no control service configured for user '${USER}' (used today: ${used} minutes)"
+        return
+    fi
+    local remaining=$((limit > used ? limit - used : 0))
+    echo "Remaining time: ${remaining} minutes (used ${used} of ${limit} minutes today)"
+}
+
 cmd_reset() {
     require_non_root
     write_used 0
@@ -196,6 +218,7 @@ main() {
     case "$cmd" in
         setup) cmd_setup "$@" ;;
         remove) cmd_remove "$@" ;;
+        status) cmd_status "$@" ;;
         reset) cmd_reset "$@" ;;
         run) cmd_run "$@" ;;
         update) cmd_update "$@" ;;

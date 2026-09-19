@@ -27,6 +27,9 @@ Commands (dispatched in `main`, one `cmd_*` function each):
   `daemon-reload`, `enable` and `restart`. The limit is stored only in the unit file.
 - `remove` (non-root): runs `disable --now` on the user unit, deletes the unit file and runs `daemon-reload`.
   It keeps `~/.cronkid`, so running `setup` again continues from the previous used time.
+- `status` (non-root): prints the remaining minutes as limit minus today's used time, floored at 0.
+  The limit comes from `read_limit`, which parses `--limit N` from the unit's `ExecStart=`. Without a
+  unit file it reports that no service is configured.
 - `reset` (non-root): writes today's date with `0` to `~/.cronkid`.
 - `run --limit <minutes>`: an internal command that the service executes and that is not listed in the usage text. It loops:
   if used >= limit it calls `loginctl terminate-user "$USER"`, then sleeps `TICK_SECONDS` (60) and adds 1.
