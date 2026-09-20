@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# Stub for notify-send. It appends '<urgency>|<body>' to $STUB_STATE/notifications and records
+# every call in $STUB_STATE/notify-send.log. While $STUB_STATE/notify_fail exists it fails, like
+# a desktop whose notification daemon is not up yet.
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "notify-send $*" >>"${state}/notify-send.log"
+[[ -e ${state}/notify_fail ]] && exit 1
+
+urgency=""
+for arg in "$@"; do
+    case "$arg" in
+        --urgency=*) urgency="${arg#--urgency=}" ;;
+    esac
+done
+body="${!#}"
+printf '%s|%s\n' "$urgency" "$body" >>"${state}/notifications"
+exit 0

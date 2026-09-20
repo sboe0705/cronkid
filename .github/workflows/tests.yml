@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the syntax of the scripts
+        run: bash -n cronkid install.sh
+
+      - name: Run shellcheck
+        run: shellcheck -x cronkid install.sh tests/*.sh tests/lib/*.sh tests/lib/stubs/*
+
+      # The suite runs as the unprivileged runner user: cronkid refuses to control root, and no
+      # test needs a systemd, a desktop or a network of its own (they are stubbed).
+      - name: Run the test suite
+        run: tests/run-tests.sh

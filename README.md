@@ -1,5 +1,7 @@
 # cronkid
 
+[![tests](https://github.com/sboe0705/cronkid/actions/workflows/tests.yml/badge.svg)](https://github.com/sboe0705/cronkid/actions/workflows/tests.yml)
+
 A shell-based parental control for Linux that limits the usage time of configured users.
 The used time is stored on disk, so the limit survives logouts and reboots.
 
@@ -87,3 +89,20 @@ Running `setup` again with another limit replaces the previous configuration.
   meant to be annoying enough to end the session.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
   service, run `cronkid reset` or edit the file.
+
+## Development
+
+The scripts come with a test suite of their own, written in bash:
+
+```bash
+tests/run-tests.sh                           # everything
+tests/run-tests.sh tests/test_run_loop.sh    # one file
+tests/run-tests.sh tests/test_run_loop.sh unlocking   # one file, tests matching 'unlocking'
+```
+
+It needs nothing but `bash` and `curl`, uses `shellcheck` if it is installed, and has to be run as a
+regular user (cronkid refuses to control root). Nothing on the machine is touched: every test runs
+with its own temporary `HOME`, and `loginctl`, `notify-send` and `systemctl` are stubs that record
+what cronkid asked of them. The counting loop is tested with one second per checked minute, so the
+whole suite takes about a minute. The same checks — `bash -n`, `shellcheck` and the suite — run in
+GitHub Actions on every push and pull request.

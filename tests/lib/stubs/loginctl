@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# Stub for loginctl. It reports the sessions and the locked hints that the test wrote into
+# $STUB_STATE and records every call, so that a test can check what cronkid asked for:
+#
+#   $STUB_STATE/sessions        the session IDs of the user, separated by spaces
+#   $STUB_STATE/type.<id>       the session type (default: wayland)
+#   $STUB_STATE/locked.<id>     exists while the session reports LockedHint=yes
+#   $STUB_STATE/locker_active   'lock-session' locks for real, like a running screen locker
+#   $STUB_STATE/loginctl_broken every call fails, like a system without a usable loginctl
+#   $STUB_STATE/loginctl.log    every call
+#   $STUB_STATE/locks.log       the sessions of every 'lock-session' call
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "loginctl $*" >>"${state}/loginctl.log"
+if [[ -e ${state}/loginctl_broken ]]; then
+    echo "stub: loginctl is broken" >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    show-user)
+        # show-user <user> --property=Sessions --value
+        [[ $* == *--property=Sessions* ]] || exit 1
+        cat "${state}/sessions" 2>/dev/null || true
+        ;;
+    show-session)
+        # show-session <id> --property=Type|LockedHint --value
+        session="${2:-}"
+        if [[ $* == *--property=Type* ]]; then
+            if [[ -f ${state}/type.${session} ]]; then
+                cat "${state}/type.${session}"
+            else
+                echo "wayland"
+            fi
+        elif [[ $* == *--property=LockedHint* ]]; then
+            if [[ -e ${state}/locked.${session} ]]; then echo "yes"; else echo "no"; fi
+        else
+            exit 1
+        fi
+        ;;
+    lock-session)
+        session="${2:-}"
+        echo "$session" >>"${state}/locks.log"
+        # Without a screen locker the request is lost, exactly as loginctl reports success when
+        # nobody is listening.
+        if [[ -e ${state}/locker_active ]]; then
+            touch "${state}/locked.${session}"
+        fi
+        ;;
+    *)
+        echo "stub: unsupported loginctl call: $*" >&2
+        exit 1
+        ;;
+esac
+exit 0

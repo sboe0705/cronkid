@@ -13,6 +13,9 @@ The used time is stored on disk, so it survives reboots. See `README.md` for use
 - `install.sh`: the installer, meant for `curl -fsSL .../install.sh | sudo bash`. It downloads
   `cronkid` from `CRONKID_URL` and installs it.
 - `README.md`: user documentation. `LICENSE`: MIT.
+- `tests/`: the test suite (`tests/run-tests.sh`), see "Testing".
+- `.github/workflows/tests.yml`: runs `bash -n`, `shellcheck -x` and the suite on every push and
+  pull request.
 
 Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH`). Branch URLs on
 `raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). The GitHub REST API is also cached, for 60 seconds, and is limited to 60 requests per hour
@@ -24,6 +27,11 @@ fails, they fall back to the branch URL. In `cronkid` this lives in `origin_url`
 only changes after a push to `main` followed by `cronkid update`.
 
 ## Current state of `cronkid`
+
+Both scripts run their `main` only when they are executed, not when they are sourced
+(`if [[ ${BASH_SOURCE[0]} == "$0" ]]`), which is how the tests get at the single functions. In
+`install.sh` the whole flow lives in `main`, and the root check is the function `require_root`,
+which a test replaces.
 
 Commands (dispatched in `main`, one `cmd_*` function each):
 
@@ -126,6 +134,11 @@ old plain-integer format is read as 0.
 - After every change, commit and push directly to `main` (`git push origin main`), unless the user
   asks otherwise. There are no feature branches or PRs.
 - Keep `README.md` and this file in sync with the current state of the scripts in the same commit.
+  `tests/test_docs.sh` checks the easy half of that: every command of `main` appears in the usage
+  text, in `README.md` and here.
+- Every change comes with its tests. `tests/run-tests.sh` and `shellcheck -x cronkid install.sh
+  tests/*.sh tests/lib/*.sh tests/lib/stubs/*` have to pass before pushing; the GitHub Action runs
+  both again.
 
 ## Conventions
 
@@ -138,11 +151,38 @@ old plain-integer format is read as 0.
 
 ## Testing
 
-There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the counting loop
-without locking the screen, copy the script with `TICK_SECONDS=1`, `CHECK_SECONDS=1` and a short
-`LOCK_GRACE_SECONDS`, put `loginctl` and `notify-send` stubs first in `PATH`, and point `HOME` at a
-temporary directory. Seeding `~/.cronkid` with a used time close to or past the limit is the quickest
-way to reach the warnings and the lock. The `loginctl` stub needs `show-user` (the session IDs),
-`show-session` with `--property=Type` and `--property=LockedHint`, and `lock-session`; letting it read
-the session list and the locked hint from files makes a login testable by writing a new ID into the one,
-and an unlock by having `lock-session` create the other and removing it while the loop runs.
+`tests/run-tests.sh` runs the whole suite (about a minute), `tests/run-tests.sh tests/test_run_loop.sh`
+a single file and a second argument only the tests whose name contains it. It has to run as a
+regular user, because cronkid refuses to control root. Every test runs in a subshell of its own with
+a temporary `HOME`, a temporary `STUB_STATE` and `tests/lib/stubs` first in `PATH`, so a test never
+touches the machine and never needs a network: `loginctl`, `notify-send` and `systemctl` are stubs
+that record their calls and take the sessions, the session types, the locked hints and the failures
+they are to simulate from files. `tests/lib/harness.sh` has a helper for each of them
+(`set_sessions`, `set_session_type`, `enable_locker`, `unlock_sessions`, `break_loginctl`,
+`break_notify_send`, `stub_curl_output`, ...) besides the assertions.
+
+A test file sources the harness, defines `test_*` functions and ends with `harness_main "$@"`.
+`run_cronkid` runs the script as a command; `load_cronkid` and `load_install_sh` source it to call
+single functions, and `run` calls a command or a function in a subshell with `set -e`, as the
+scripts themselves run, and keeps `status`, `out` and `err`.
+
+- The counting loop is driven by `tests/lib/run_loop.sh`, which sources the script and replaces only
+  `TICK_SECONDS`, `CHECK_SECONDS` and `LOCK_GRACE_SECONDS` (`TEST_TICK_SECONDS`, `TEST_CHECK_SECONDS`
+  and `TEST_GRACE_SECONDS`, one second by default), so that a test reaches the warnings and the lock
+  in seconds. `start_loop` starts it in the background, `wait_for` waits for a notification, a lock
+  or a counted minute, and the test's subshell stops it again. A test that shows that something does
+  *not* happen any more waits `QUIET_SECONDS` and compares the counters.
+- `update` and `install.sh` run against an origin directory served as a `file://` URL
+  (`CRONKID_URL`), with `INSTALL_PATH` pointing into the test's temporary directory and
+  `require_root` redefined to do nothing.
+
+Test files: `test_state.sh` (used-time file, daily reset), `test_options.sh` (option parsing and the
+pure functions around the countdown and the unit), `test_commands.sh` (setup, remove, status, reset,
+dispatching), `test_sessions.sh` (notifications, graphical sessions, lock and locked hint),
+`test_run_loop.sh` (counting, warnings, lock, login, unlock, reset, retried notifications),
+`test_version.sh`, `test_update.sh`, `test_install.sh` and `test_docs.sh` (syntax, shellcheck, and
+the documentation of every command).
+
+Not covered, because it needs root, a real systemd or the network: everything behind
+`--user <name>` (`runuser`, `systemctl --user --machine=`), `uninstall`, and the download from
+GitHub. Test those by hand on a real machine, e.g. with a second user account.

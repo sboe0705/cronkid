@@ -445,7 +445,8 @@ cmd_run() {
 
     # The message that announces the lock: it goes out in the last minute and whenever the user is
     # granted that minute anew.
-    local lock_warning="The screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")."
+    local lock_warning
+    lock_warning="The screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")."
 
     # The state of the loop:
     #   stage          the stage of the countdown the user was last notified of
@@ -618,6 +619,7 @@ cmd_update() {
     url="${base}/cronkid"
     tmp="$(mktemp "${INSTALL_PATH}.XXXXXX")" || die "cannot create temporary file next to ${INSTALL_PATH}"
     # The value is expanded now, because the trap runs after this function's locals are gone.
+    # shellcheck disable=SC2064
     trap "rm -f -- $(printf '%q' "$tmp")" EXIT
 
     curl -fsSL --retry 3 --connect-timeout 10 "$url" -o "$tmp" \
@@ -646,8 +648,8 @@ cmd_update() {
 
 cmd_uninstall() {
     require_root uninstall
-    local name uid home
-    while IFS=: read -r name _ uid _ _ home _; do
+    local name home
+    while IFS=: read -r name _ _ _ _ home _; do
         [[ -d $home ]] || continue
         local unit="${home}/.config/systemd/user/${SERVICE_NAME}"
         if [[ -f $unit ]]; then
@@ -680,4 +682,9 @@ main() {
     esac
 }
 
-main "$@"
+# Running the script executes the command; sourcing it only defines the functions, which is what
+# the test suite does. BASH_SOURCE is unset when the script is read from a pipe, where $0 is the
+# fallback, so that a piped script still runs.
+if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]; then
+    main "$@"
+fi

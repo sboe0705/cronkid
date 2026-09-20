@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# Stub for systemctl. It records every call in $STUB_STATE/systemctl.log and succeeds, except for
+# 'is-active', which only succeeds while $STUB_STATE/manager_active exists (the target user is
+# logged in).
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "systemctl $*" >>"${state}/systemctl.log"
+if [[ $* == *is-active* ]]; then
+    [[ -e ${state}/manager_active ]] || exit 3
+fi
+exit 0
