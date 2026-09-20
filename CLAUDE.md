@@ -69,7 +69,11 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   `notify-send` it returns 0, so nothing is retried. The loop notifies once at `warn` minutes left, once
   at 1 minute left, once when the limit is reached, and once after login while the remaining time is
   still above `warn`. The flags are cleared when the remaining time rises above `warn` again (`reset`,
-  midnight).
+  midnight) and at every login: each tick compares the IDs from `graphical_sessions` (the user's
+  sessions whose `Type` is `x11`, `wayland` or `mir`) with those of the previous tick, and an ID that
+  was not there before clears all four flags, so the login notification is sent again when the service
+  was already running from an earlier login. Sessions that disappear change nothing, and without a
+  usable `loginctl` the announcement stays a one-off at service start.
   It re-reads `~/.cronkid` on every tick, so `reset` takes effect while the service runs.
 - `update` (root, auto-sudo): downloads `cronkid` from `origin_url`, with retries, into a temp file next to
   `/usr/local/bin/cronkid`. It checks that the file starts with `#!` and passes `bash -n`, skips the

@@ -54,8 +54,9 @@ Running `setup` again with another limit replaces the previous configuration.
 - The user is warned by a desktop notification `--warn` minutes before the end (5 by default, or
   1 minute if the limit itself is not longer than that) and again in the last minute. After logging
   in the user is notified of the remaining time, or gets the warning right away if the time is
-  almost up. A notification that cannot be delivered yet, because the desktop is still starting,
-  is retried on the following checks.
+  almost up. This also happens at a further login, because the service can keep running across
+  logouts, as long as the user's service manager stays up. A notification that cannot be delivered
+  yet, because the desktop is still starting, is retried on the following checks.
 - When the used time reaches the limit, the service locks the screen of all sessions of the user
   (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
   after logging in. The screen is locked again on every check, so unlocking it does not buy extra time.

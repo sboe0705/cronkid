@@ -328,6 +328,19 @@ notify() {
     notify-send --app-name=cronkid --urgency="$urgency" "Screen time" "$body" 2>/dev/null
 }
 
+# Prints the IDs of the user's graphical login sessions, one per line. Only those can show a
+# notification, and an ID that was not there before means the user has logged in again.
+graphical_sessions() {
+    local sessions session type
+    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 0
+    for session in $sessions; do
+        type="$(loginctl show-session "$session" --property=Type --value 2>/dev/null)" || continue
+        case "$type" in
+            x11 | wayland | mir) echo "$session" ;;
+        esac
+    done
+}
+
 # Locks the screen of every session of the user. Sessions that do not support a screen lock,
 # such as the session of the user's service manager, are skipped.
 lock_sessions() {
@@ -361,12 +374,28 @@ cmd_run() {
     # Each notification is sent once per day, and a flag is only set once the message was really
     # delivered: at login the service usually runs before the notification daemon of the desktop,
     # so undelivered messages are retried on the following ticks. The flags are cleared as soon as
-    # the remaining time is above the warning again, after 'cronkid reset' or at midnight.
-    local locked=0 announced=0 warned=0 last_warned=0
+    # the remaining time is above the warning again, after 'cronkid reset', at midnight, and for a
+    # new login, which gets its own notification.
+    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" "
     while true; do
-        local used remaining
+        local used remaining sessions session
         used="$(read_used)"
         remaining=$((limit > used ? limit - used : 0))
+
+        # The service keeps running while the user's service manager is up, which outlives a single
+        # login. So every graphical session that is new since the last check counts as a login and
+        # the notifications are sent again.
+        sessions=" "
+        for session in $(graphical_sessions); do
+            sessions="${sessions}${session} "
+            if [[ $seen_sessions != *" ${session} "* ]]; then
+                locked=0
+                announced=0
+                warned=0
+                last_warned=0
+            fi
+        done
+        seen_sessions="$sessions"
 
         if ((remaining > warn)); then
             warned=0
