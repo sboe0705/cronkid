@@ -26,8 +26,8 @@ CRONKID_VERSION=""
 # Seconds of checks that add one minute of used time.
 TICK_SECONDS=60
 # Seconds between two checks of the control service. The checks are more frequent than a minute of
-# used time, so that a notification the desktop was not ready for yet, a new login and the screen
-# lock do not have to wait for the next minute.
+# used time, so that a notification the desktop was not ready for yet and a new login do not have to
+# wait for the next minute.
 CHECK_SECONDS=5
 # Minutes before the end at which the first warning is shown, unless --warn says otherwise.
 DEFAULT_WARN_MINUTES=5
@@ -411,7 +411,7 @@ cmd_run() {
     # so undelivered messages are retried on the following checks. The flags are cleared as soon as
     # the remaining time is above the warning again, after 'cronkid reset', at midnight, and for a
     # new login, which gets its own notification.
-    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" " elapsed=0
+    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" " elapsed=0 minute_done=0
     while true; do
         local used remaining sessions session
         used="$(read_used)"
@@ -445,14 +445,17 @@ cmd_run() {
         fi
 
         if ((remaining == 0)); then
-            # The screen is locked again on every check, so that unlocking it does not buy extra
-            # time. Only the first lock of a series is logged, to keep the journal readable.
+            # The screen is locked as soon as the limit is reached or the user logs in again, and
+            # after that once per counted minute: unlocking it buys the rest of that minute, no
+            # more. Only the first lock of a series is logged, to keep the journal readable.
             if ((locked == 0)); then
                 echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
                 notify critical "Your screen time for today is up." || true
                 locked=1
+                lock_sessions
+            elif ((minute_done == 1)); then
+                lock_sessions
             fi
-            lock_sessions
         else
             locked=0
             if ((remaining == 1)); then
@@ -465,11 +468,13 @@ cmd_run() {
             fi
         fi
 
+        minute_done=0
         sleep "$CHECK_SECONDS"
         elapsed=$((elapsed + CHECK_SECONDS))
         if ((elapsed >= TICK_SECONDS)); then
             elapsed=0
             write_used $(($(read_used) + 1))
+            minute_done=1
         fi
     done
 }

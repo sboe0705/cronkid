@@ -59,12 +59,14 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
 - `run --limit <minutes> [--warn <minutes>]`: an internal command that the service executes and that is
   not listed in the usage text. It loops: if used >= limit it calls `lock_sessions`, then sleeps
   `CHECK_SECONDS` (5) and adds a minute to the used time once the checks add up to `TICK_SECONDS`
-  (60). The checks are that much shorter than a minute so that an undelivered notification, a new
-  login and the screen lock are handled within seconds instead of at the next minute.
+  (60). The checks are that much shorter than a minute so that an undelivered notification and a new
+  login are handled within seconds instead of at the next minute.
   A unit written before `--warn` existed still works, because the
   option is optional here. `lock_sessions` reads the session IDs from `loginctl show-user "$USER" --property=Sessions --value` and runs
   `loginctl lock-session <id>` for each, ignoring sessions that do not support a screen lock (the
-  manager session). The lock is repeated on every check, so unlocking does not buy extra time; only the
+  manager session). The first lock happens right when the limit is reached and at every new login
+  (`locked` is 0 then); after that the lock is repeated once per counted minute (`minute_done`), not on
+  every check, so unlocking buys at most the rest of that minute. Only the
   first lock of a series is logged. The user stays logged in, so the used time keeps counting.
   `notify` sends a desktop notification via `notify-send` (setting `DBUS_SESSION_BUS_ADDRESS` to
   `/run/user/<uid>/bus` if it is unset) and returns non-zero when the message was not delivered, so the

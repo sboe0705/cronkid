@@ -62,7 +62,8 @@ Running `setup` again with another limit replaces the previous configuration.
   arrives within seconds of the desktop being ready.
 - When the used time reaches the limit, the service locks the screen of all sessions of the user
   (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
-  after logging in. The screen is locked again on every check, so unlocking it does not buy extra time.
+  after logging in. After that it is locked again with every counted minute, so unlocking it buys at
+  most the rest of the current minute.
 - The version is written into the script while it is installed or updated, because a running script
   cannot tell which commit it came from. A script run straight from a clone of the repository
   therefore has no version.
