@@ -62,33 +62,37 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   minute so that an undelivered notification and a new login are handled within seconds instead of at
   the next minute. A unit written before `--warn` existed still works, because the option is optional
   here. `~/.cronkid` is re-read on every check, so `reset` takes effect while the service runs. The loop
-  is a small state machine of three parts:
+  is a small state machine:
   - `countdown_stage` maps the remaining minutes to `ok`, `warn` (from `--warn` minutes left on),
     `final` (the last `FINAL_WARN_MINUTES`, 1, which is not configurable) and `up` (limit used up).
-    Entering a stage queues one notification, and so does every login: each check compares the IDs from
-    `graphical_sessions` (the user's sessions whose `Type` is `x11`, `wayland` or `mir`) with those of
-    the previous check, and an ID that was not there before is a login, as is the first check, which the
-    user's first login starts. Sessions that disappear change nothing, and without a usable `loginctl`
-    only that first check counts as a login. A login therefore always gets a notification: the remaining
-    time in `ok`, the first warning in `warn`, and the announcement of the lock in `final` and `up`.
+    Entering a stage queues one notification, and so does every login and every unlock: each check
+    compares the IDs from `graphical_sessions` (the user's sessions whose `Type` is `x11`, `wayland` or
+    `mir`) with those of the previous check, and an ID that was not there before is a login, as is the
+    first check, which the user's first login starts. Sessions that disappear change nothing, and
+    without a usable `loginctl` only that first check counts as a login. A login therefore always gets a
+    notification: the remaining time in `ok`, the first warning in `warn`, and `lock_warning` in `final`
+    and `up`.
   - The queued message is sent by `notify` on every check until it was delivered, because at login the
     service usually runs before the desktop's notification daemon; a newer message replaces one that is
     still queued. `notify` uses `notify-send` (setting `DBUS_SESSION_BUS_ADDRESS` to `/run/user/<uid>/bus`
     if it is unset) and returns non-zero when the message was not delivered. Without `notify-send` it
     returns 0, so nothing is retried.
-  - In stage `up` the screen is locked. A login in stage `final` or `up` sets `grace_left` to
+  - In stage `up` the screen is locked, driven by `lock_state`: `idle` (nothing locked, or a grace
+    period runs) sends the lock and logs the one line of the series, `locking` repeats it on every check
+    until `sessions_locked` sees `LockedHint=yes` on one of the user's sessions, because
+    `loginctl lock-session` succeeds even when no locker listens and at login the locker is often not up
+    yet. `locked` then only watches: a session that does not report the lock any more was unlocked by
+    the user. A lock that no session confirms within a counted minute ends up in `unconfirmed`, where an
+    unlock cannot be told apart from a lost lock, so the screen is locked again once per counted minute
+    (`minute_done`) as a fallback, and the hint is still checked in case the locker starts reporting it.
+  - A login in stage `final` or `up`, and an unlock, set `lock_state` back to `idle` and `grace_left` to
     `LOCK_GRACE_SECONDS` (`FINAL_WARN_MINUTES` * 60), which runs down with the checks and holds the lock
-    back that long, so the announced minute is really given; the grace is never cut short, it only runs
-    out. In a session that was already running, the lock follows the limit right away, because the
-    warning went out a minute earlier. `lock_sessions` reads the session IDs from
+    back that long, so the announced minute is really given; the grace period is never cut short. In a
+    session that was already running, the lock follows the limit right away, because the warning went
+    out a minute earlier. `lock_sessions` reads the session IDs from
     `loginctl show-user "$USER" --property=Sessions --value` and runs `loginctl lock-session <id>` for
-    each, ignoring sessions that do not support a screen lock (the manager session). Only the first lock
-    of a series is logged. After it the screen is locked again once per counted minute (`minute_done`),
-    not on every check, so unlocking buys at most the rest of that minute. `loginctl lock-session`
-    succeeds even when no locker listens, so a lock can be lost: while `lock_confirmed` is 0 the lock is
-    retried on every check until `sessions_locked` sees `LockedHint=yes` on one of the user's sessions.
-    The retries also stop at the next counted minute, so a locker that never sets the hint is not locked
-    on every check. The user stays logged in, so the used time keeps counting.
+    each, ignoring sessions that do not support a screen lock (the manager session). The user stays
+    logged in, so the used time keeps counting.
 - `version`: prints `CRONKID_VERSION` through `local_version`, or a note that the script was not
   installed. The variable holds `<YYYY-MM-DD> <HH:MM> UTC <short sha>` and is empty in the repository: `stamp_version` writes it into
   the `CRONKID_VERSION=""` line of the downloaded script during install and `update`, because a running
@@ -140,5 +144,5 @@ without locking the screen, copy the script with `TICK_SECONDS=1`, `CHECK_SECOND
 temporary directory. Seeding `~/.cronkid` with a used time close to or past the limit is the quickest
 way to reach the warnings and the lock. The `loginctl` stub needs `show-user` (the session IDs),
 `show-session` with `--property=Type` and `--property=LockedHint`, and `lock-session`; letting it read
-the session list from a file makes a login testable by writing a new ID into that file while the loop
-runs.
+the session list and the locked hint from files makes a login testable by writing a new ID into the one,
+and an unlock by having `lock-session` create the other and removing it while the loop runs.

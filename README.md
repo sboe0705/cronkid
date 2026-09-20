@@ -65,10 +65,13 @@ Running `setup` again with another limit replaces the previous configuration.
   (`loginctl lock-session`). In a session that is already running this happens right away, because the
   user was warned a minute earlier. A user who logs in when the limit is already used up, or during
   the last minute, is warned first and keeps the screen for one more minute to finish what they are
-  doing. After the lock the screen is locked again with every counted minute, so unlocking it buys at
-  most the rest of the current minute. `loginctl` reports success even when nobody locked the screen,
-  which happens when the screen locker of the desktop is not up yet: the lock is therefore repeated
-  every few seconds until a session reports itself as locked, at most until the next counted minute.
+  doing. Unlocking the screen again gets the same warning and the same minute, after which the screen
+  is locked again.
+- `loginctl` reports success even when nobody locked the screen, which happens when the screen locker
+  of the desktop is not up yet: the lock is therefore repeated every few seconds until a session
+  reports itself as locked. On a desktop whose screen locker never reports the lock, an unlock cannot
+  be told apart from a lock that was lost; there the screen is locked again with every counted minute
+  instead, so unlocking it buys at most the rest of the current minute.
 - The version is written into the script while it is installed or updated, because a running script
   cannot tell which commit it came from. A script run straight from a clone of the repository
   therefore has no version. It is stored as UTC, because the machine that installs the script is not
@@ -79,7 +82,8 @@ Running `setup` again with another limit replaces the previous configuration.
 ## Known limitations
 
 - The user stays logged in, so the used time keeps counting while the screen is locked.
-- A user who knows their password can unlock the screen. It is locked again within a minute; only a
-  new login gets the extra minute, unlocking does not.
+- A user who knows their password can unlock the screen. They are warned and locked again a minute
+  later, so the screen time can be stretched in one-minute steps; the lock that keeps coming back is
+  meant to be annoying enough to end the session.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
   service, run `cronkid reset` or edit the file.
