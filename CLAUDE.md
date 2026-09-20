@@ -58,10 +58,13 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
 - `reset [--user <name>]`: writes today's date with `0` to `~/.cronkid`. For another user it uses `run_as_target`.
 - `run --limit <minutes> [--warn <minutes>]`: an internal command that the service executes and that is
   not listed in the usage text. It loops: if used >= limit it calls `lock_sessions`, then sleeps
-  `TICK_SECONDS` (60) and adds 1. A unit written before `--warn` existed still works, because the
+  `CHECK_SECONDS` (5) and adds a minute to the used time once the checks add up to `TICK_SECONDS`
+  (60). The checks are that much shorter than a minute so that an undelivered notification, a new
+  login and the screen lock are handled within seconds instead of at the next minute.
+  A unit written before `--warn` existed still works, because the
   option is optional here. `lock_sessions` reads the session IDs from `loginctl show-user "$USER" --property=Sessions --value` and runs
   `loginctl lock-session <id>` for each, ignoring sessions that do not support a screen lock (the
-  manager session). The lock is repeated on every tick, so unlocking does not buy extra time; only the
+  manager session). The lock is repeated on every check, so unlocking does not buy extra time; only the
   first lock of a series is logged. The user stays logged in, so the used time keeps counting.
   `notify` sends a desktop notification via `notify-send` (setting `DBUS_SESSION_BUS_ADDRESS` to
   `/run/user/<uid>/bus` if it is unset) and returns non-zero when the message was not delivered, so the
@@ -74,7 +77,7 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   was not there before clears all four flags, so the login notification is sent again when the service
   was already running from an earlier login. Sessions that disappear change nothing, and without a
   usable `loginctl` the announcement stays a one-off at service start.
-  It re-reads `~/.cronkid` on every tick, so `reset` takes effect while the service runs.
+  It re-reads `~/.cronkid` on every check, so `reset` takes effect while the service runs.
 - `update` (root, auto-sudo): downloads `cronkid` from `origin_url`, with retries, into a temp file next to
   `/usr/local/bin/cronkid`. It checks that the file starts with `#!` and passes `bash -n`, skips the
   update if the file is identical, then does `chmod 0755` and an atomic `mv`. Any failure keeps the
@@ -107,6 +110,6 @@ old plain-integer format is read as 0.
 ## Testing
 
 There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the counting loop
-without locking the screen, copy the script with `TICK_SECONDS=1`, put `loginctl` and `notify-send`
-stubs first in `PATH`, and point `HOME` at a temporary directory. Seeding `~/.cronkid` with a used
+without locking the screen, copy the script with `TICK_SECONDS=1` and `CHECK_SECONDS=1`, put
+`loginctl` and `notify-send` stubs first in `PATH`, and point `HOME` at a temporary directory. Seeding `~/.cronkid` with a used
 time close to the limit is the quickest way to reach the warnings.

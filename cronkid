@@ -19,8 +19,12 @@ CRONKID_BRANCH="main"
 INSTALL_PATH="/usr/local/bin/cronkid"
 SERVICE_NAME="cronkid.service"
 USED_FILE_NAME=".cronkid"
-# Seconds between two checks of the control service; each check adds one minute of used time.
+# Seconds of checks that add one minute of used time.
 TICK_SECONDS=60
+# Seconds between two checks of the control service. The checks are more frequent than a minute of
+# used time, so that a notification the desktop was not ready for yet, a new login and the screen
+# lock do not have to wait for the next minute.
+CHECK_SECONDS=5
 # Minutes before the end at which the first warning is shown, unless --warn says otherwise.
 DEFAULT_WARN_MINUTES=5
 
@@ -373,10 +377,10 @@ cmd_run() {
 
     # Each notification is sent once per day, and a flag is only set once the message was really
     # delivered: at login the service usually runs before the notification daemon of the desktop,
-    # so undelivered messages are retried on the following ticks. The flags are cleared as soon as
+    # so undelivered messages are retried on the following checks. The flags are cleared as soon as
     # the remaining time is above the warning again, after 'cronkid reset', at midnight, and for a
     # new login, which gets its own notification.
-    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" "
+    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" " elapsed=0
     while true; do
         local used remaining sessions session
         used="$(read_used)"
@@ -410,7 +414,7 @@ cmd_run() {
         fi
 
         if ((remaining == 0)); then
-            # The screen is locked again on every tick, so that unlocking it does not buy extra
+            # The screen is locked again on every check, so that unlocking it does not buy extra
             # time. Only the first lock of a series is logged, to keep the journal readable.
             if ((locked == 0)); then
                 echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
@@ -430,8 +434,12 @@ cmd_run() {
             fi
         fi
 
-        sleep "$TICK_SECONDS"
-        write_used $(($(read_used) + 1))
+        sleep "$CHECK_SECONDS"
+        elapsed=$((elapsed + CHECK_SECONDS))
+        if ((elapsed >= TICK_SECONDS)); then
+            elapsed=0
+            write_used $(($(read_used) + 1))
+        fi
     done
 }
 
