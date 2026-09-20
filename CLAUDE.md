@@ -80,16 +80,20 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   was already running from an earlier login. Sessions that disappear change nothing, and without a
   usable `loginctl` the announcement stays a one-off at service start.
   It re-reads `~/.cronkid` on every check, so `reset` takes effect while the service runs.
-- `version`: prints `CRONKID_VERSION`, or a note that the script was not installed. The variable holds
-  `<YYYY-MM-DD> <HH:MM> UTC <short sha>` and is empty in the repository: `stamp_version` writes it into
+- `version`: prints `CRONKID_VERSION` through `local_version`, or a note that the script was not
+  installed. The variable holds `<YYYY-MM-DD> <HH:MM> UTC <short sha>` and is empty in the repository: `stamp_version` writes it into
   the `CRONKID_VERSION=""` line of the downloaded script during install and `update`, because a running
   script cannot tell which commit it came from. The value comes from `commit_version`, which reads the
   commit date from the GitHub API (once per install, so the rate limit is not a concern) and falls back
   to the short sha alone. `stamp_version` returns non-zero when the version is not plain text or the
   script has no such line, as an older version of it has; the caller then reports no version.
-  Both are duplicated in `install.sh`, which resolves the sha anyway; `cmd_update` takes it from the
-  last path segment of `origin_url`. With a branch-URL fallback or `CRONKID_URL` there is no sha and
-  no version.
+  `local_version` converts the stored UTC time to the time zone of the machine with
+  `date -d "<utc> UTC"` and prints `<YYYY-MM-DD> <HH:MM> <TZ> <short sha>`. The stamp stays UTC
+  because the machine that installs the script is not necessarily the one that runs it. A version
+  without a time, and one that `date` cannot read, is printed unchanged.
+  All three are duplicated in `install.sh`, which resolves the sha anyway and shows the installed
+  version the same way; `cmd_update` takes the sha from the last path segment of `origin_url`. With a
+  branch-URL fallback or `CRONKID_URL` there is no sha and no version.
 - `update` (root, auto-sudo): downloads `cronkid` from `origin_url`, with retries, into a temp file next to
   `/usr/local/bin/cronkid`. It checks that the file starts with `#!`, stamps the version, and passes
   `bash -n`, skips the update if the file is identical, then does `chmod 0755` and an atomic `mv`. Any failure keeps the

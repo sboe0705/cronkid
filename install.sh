@@ -30,6 +30,24 @@ commit_version() {
     fi
 }
 
+# Prints the version <1> with its UTC time converted to the time zone of this machine, for example
+# "2026-09-20 05:03 CEST b12c9b6". The version is stamped in as UTC because the machine that installs
+# the script is not necessarily the one that runs it. A version that holds no time, and one that
+# 'date' cannot read, is printed unchanged.
+local_version() {
+    local version="$1" utc="" rest="" stamp=""
+    if [[ $version =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2})\ UTC\ (.*)$ ]]; then
+        utc="${BASH_REMATCH[1]}"
+        rest="${BASH_REMATCH[2]}"
+        stamp="$(date -d "${utc} UTC" '+%F %H:%M %Z' 2>/dev/null || true)"
+    fi
+    if [[ -n $stamp ]]; then
+        echo "${stamp} ${rest}"
+    else
+        echo "$version"
+    fi
+}
+
 # Writes the version <2> into the CRONKID_VERSION line of the script <1>, which is where
 # 'cronkid version' reads it from. Returns non-zero without touching the file if the version is not
 # plain text or if the script has no such line, as an older version of it has.
@@ -69,7 +87,7 @@ if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
     stamp_version "$tmp" "$version" || version=""
 fi
 if [[ -n $version ]]; then
-    suffix=" (version ${version})"
+    suffix=" (version $(local_version "$version"))"
 fi
 bash -n "$tmp"
 install -m 0755 "$tmp" "$INSTALL_PATH"
