@@ -387,6 +387,20 @@ lock_sessions() {
     done
 }
 
+# Returns 0 if a session of the user reports itself as locked. Screen lockers set this hint once they
+# have taken over the screen, which is the only way to notice that a lock request was lost because
+# the locker was not running yet; a locker that does not set the hint is never reported as locked.
+sessions_locked() {
+    local sessions session
+    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 1
+    for session in $sessions; do
+        if [[ $(loginctl show-session "$session" --property=LockedHint --value 2>/dev/null) == "yes" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Internal command executed by the control service: counts the used minutes, warns the user
 # before the end and locks the screen as soon as the limit is reached.
 cmd_run() {
@@ -411,7 +425,8 @@ cmd_run() {
     # so undelivered messages are retried on the following checks. The flags are cleared as soon as
     # the remaining time is above the warning again, after 'cronkid reset', at midnight, and for a
     # new login, which gets its own notification.
-    local locked=0 announced=0 warned=0 last_warned=0 seen_sessions=" " elapsed=0 minute_done=0
+    local locked=0 lock_confirmed=0 announced=0 warned=0 last_warned=0 seen_sessions=" "
+    local elapsed=0 minute_done=0
     while true; do
         local used remaining sessions session
         used="$(read_used)"
@@ -452,9 +467,22 @@ cmd_run() {
                 echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
                 notify critical "Your screen time for today is up." || true
                 locked=1
+                lock_confirmed=0
                 lock_sessions
             elif ((minute_done == 1)); then
+                # The next minute is counted, so the screen is locked again anyway and the retries
+                # below stop: a screen locker that does not report the hint has had its chance.
+                lock_confirmed=1
                 lock_sessions
+            elif ((lock_confirmed == 0)); then
+                if sessions_locked; then
+                    lock_confirmed=1
+                else
+                    # loginctl reports success even when nobody locked the screen, and at login the
+                    # screen locker of the desktop is often not up yet, so the lock is repeated
+                    # until a session confirms it.
+                    lock_sessions
+                fi
             fi
         else
             locked=0

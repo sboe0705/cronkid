@@ -67,7 +67,10 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   manager session). The first lock happens right when the limit is reached and at every new login
   (`locked` is 0 then); after that the lock is repeated once per counted minute (`minute_done`), not on
   every check, so unlocking buys at most the rest of that minute. Only the
-  first lock of a series is logged. The user stays logged in, so the used time keeps counting.
+  first lock of a series is logged. `loginctl lock-session` succeeds even when no locker listens, so a
+  lock at login can be lost: while `lock_confirmed` is 0 the lock is retried on every check until
+  `sessions_locked` sees `LockedHint=yes` on one of the user's sessions. The retries also stop at the
+  next counted minute, so a locker that never sets the hint is not locked on every check. The user stays logged in, so the used time keeps counting.
   `notify` sends a desktop notification via `notify-send` (setting `DBUS_SESSION_BUS_ADDRESS` to
   `/run/user/<uid>/bus` if it is unset) and returns non-zero when the message was not delivered, so the
   loop can retry it: at login the service usually runs before the desktop's notification daemon. Without
