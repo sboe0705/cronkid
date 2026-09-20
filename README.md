@@ -7,6 +7,7 @@ The used time is stored on disk, so the limit survives logouts and reboots.
 
 - Linux with systemd (user services and `loginctl`)
 - `bash`, `curl`, `sudo`
+- `notify-send` (package `libnotify`) for the warnings; without it the screen is locked without warning
 
 ## Installation
 
@@ -20,7 +21,7 @@ This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessi
 
 | Command                                              | Description                                                                  |
 |------------------------------------------------------|------------------------------------------------------------------------------|
-| `cronkid setup --limit <minutes> [--user <username>]`| Configures and enables the control service. It starts immediately if the user is logged in, otherwise at their next login. Running it again replaces the limit. |
+| `cronkid setup --limit <minutes> [--warn <minutes>] [--user <username>]`| Configures and enables the control service. It starts immediately if the user is logged in, otherwise at their next login. Running it again replaces the configuration. `--warn` sets how many minutes before the end the first warning is shown (default 5). |
 | `cronkid remove [--user <username>]`                 | Stops and removes the control service. The used time is kept.                |
 | `cronkid status [--user <username>]`                 | Shows the remaining, used and allowed minutes for today.                     |
 | `cronkid reset [--user <username>]`                  | Resets today's used time to 0.                                               |
@@ -50,6 +51,11 @@ Running `setup` again with another limit replaces the previous configuration.
   session ends.
 - Once a minute the service adds one minute to the used time, stored in the hidden file `~/.cronkid`
   as `<date> <minutes>` (e.g. `2026-09-19 42`).
+- The user is warned by a desktop notification `--warn` minutes before the end (5 by default, or
+  1 minute if the limit itself is not longer than that) and again in the last minute. After logging
+  in the user is notified of the remaining time, or gets the warning right away if the time is
+  almost up. A notification that cannot be delivered yet, because the desktop is still starting,
+  is retried on the following checks.
 - When the used time reaches the limit, the service locks the screen of all sessions of the user
   (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
   after logging in. The screen is locked again on every check, so unlocking it does not buy extra time.
@@ -58,7 +64,6 @@ Running `setup` again with another limit replaces the previous configuration.
 
 ## Known limitations
 
-- There is no warning before the screen is locked.
 - The user stays logged in, so the used time keeps counting while the screen is locked.
 - A user who knows their password can unlock the screen. It is locked again within a minute.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
