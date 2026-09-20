@@ -31,6 +31,12 @@ TICK_SECONDS=60
 CHECK_SECONDS=5
 # Minutes before the end at which the first warning is shown, unless --warn says otherwise.
 DEFAULT_WARN_MINUTES=5
+# Minutes before the lock at which the last warning is shown. Unlike the first warning, this one is
+# not configurable.
+FINAL_WARN_MINUTES=1
+# Seconds the screen stays unlocked after a login that already is in the last minute or past the
+# limit. It matches the last warning, which is what the user is told at such a login.
+LOCK_GRACE_SECONDS=$((FINAL_WARN_MINUTES * 60))
 
 die() {
     echo "cronkid: $*" >&2
@@ -341,10 +347,11 @@ minutes_phrase() {
 }
 
 # Prints the minutes before the end at which the first warning is shown: the given value, or the
-# default if it is empty. A warning that would not fit into the limit is moved to the last minute.
+# default if it is empty. A warning that would not fit into the limit is moved to the last minute,
+# where it coincides with the last warning.
 effective_warn() {
     local limit="$1" warn="${2:-$DEFAULT_WARN_MINUTES}"
-    if ((warn >= limit)); then warn=1; fi
+    if ((warn >= limit)); then warn=$FINAL_WARN_MINUTES; fi
     echo "$warn"
 }
 
@@ -376,6 +383,22 @@ graphical_sessions() {
     done
 }
 
+# Prints the stage of the countdown for <1> remaining minutes with the first warning at <2> minutes:
+# "up" once the limit is used up, "final" for the last minute before the lock, "warn" from the first
+# warning on and "ok" before that. The user is notified once for every stage the countdown enters.
+countdown_stage() {
+    local remaining="$1" warn="$2"
+    if ((remaining == 0)); then
+        echo "up"
+    elif ((remaining <= FINAL_WARN_MINUTES)); then
+        echo "final"
+    elif ((remaining <= warn)); then
+        echo "warn"
+    else
+        echo "ok"
+    fi
+}
+
 # Locks the screen of every session of the user. Sessions that do not support a screen lock,
 # such as the session of the user's service manager, are skipped.
 lock_sessions() {
@@ -401,8 +424,8 @@ sessions_locked() {
     return 1
 }
 
-# Internal command executed by the control service: counts the used minutes, warns the user
-# before the end and locks the screen as soon as the limit is reached.
+# Internal command executed by the control service: counts the used minutes, warns the user before
+# the end and locks the screen once the limit is used up.
 cmd_run() {
     local limit="" warn=""
     while [[ $# -gt 0 ]]; do
@@ -420,85 +443,115 @@ cmd_run() {
     # Units written by an older version have no --warn, so the default applies.
     warn="$(effective_warn "$limit" "$warn")"
 
-    # Each notification is sent once per day, and a flag is only set once the message was really
-    # delivered: at login the service usually runs before the notification daemon of the desktop,
-    # so undelivered messages are retried on the following checks. The flags are cleared as soon as
-    # the remaining time is above the warning again, after 'cronkid reset', at midnight, and for a
-    # new login, which gets its own notification.
-    local locked=0 lock_confirmed=0 announced=0 warned=0 last_warned=0 seen_sessions=" "
+    # The state of the loop:
+    #   stage          the stage of the countdown the user was last notified of
+    #   pending_*      the notification that still has to be delivered
+    #   locked         whether the screen was locked since the limit was reached
+    #   lock_confirmed whether a session reported the lock
+    #   grace_left     seconds until the lock, for a login that is granted the last minute
+    #   seen_sessions  the graphical sessions of the previous check, to recognise a login
+    local stage="" pending_urgency="" pending_body=""
+    local locked=0 lock_confirmed=0 grace_left=0 seen_sessions=" "
     local elapsed=0 minute_done=0
     while true; do
-        local used remaining sessions session
+        local used remaining current new_login=0 sessions session
         used="$(read_used)"
         remaining=$((limit > used ? limit - used : 0))
 
-        # The service keeps running while the user's service manager is up, which outlives a single
-        # login. So every graphical session that is new since the last check counts as a login and
-        # the notifications are sent again.
+        # The service outlives a single login, because it runs as long as the user's service manager
+        # is up. Every graphical session that is new since the last check is therefore a login, as
+        # is the first check of the service, which the user's first login starts. Sessions that
+        # disappear change nothing, and without a usable loginctl only that first check counts.
         sessions=" "
         for session in $(graphical_sessions); do
             sessions="${sessions}${session} "
-            if [[ $seen_sessions != *" ${session} "* ]]; then
-                locked=0
-                announced=0
-                warned=0
-                last_warned=0
-            fi
+            [[ $seen_sessions == *" ${session} "* ]] || new_login=1
         done
         seen_sessions="$sessions"
+        [[ -n $stage ]] || new_login=1
 
-        if ((remaining > warn)); then
-            warned=0
-            last_warned=0
-            # The notification the user gets after logging in with time left.
-            if ((announced == 0)) && notify normal "$(minutes_phrase "$remaining") of screen time left today."; then
-                announced=1
+        # Every login is announced, and so is every stage the countdown enters. The message is only
+        # queued here; it is sent below and retried until it arrives.
+        current="$(countdown_stage "$remaining" "$warn")"
+        if ((new_login == 1)) || [[ $current != "$stage" ]]; then
+            case "$current" in
+                ok)
+                    pending_urgency="normal"
+                    pending_body="$(minutes_phrase "$remaining") of screen time left today."
+                    ;;
+                warn)
+                    pending_urgency="normal"
+                    pending_body="Only $(minutes_phrase "$remaining") of screen time left."
+                    ;;
+                final)
+                    pending_urgency="critical"
+                    pending_body="The screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")."
+                    ;;
+                up)
+                    pending_urgency="critical"
+                    if ((new_login == 1)); then
+                        # The user comes back with the limit used up, so they are told about the
+                        # lock the grace period below holds back, just like in the last minute.
+                        pending_body="The screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")."
+                    else
+                        # The limit ran out in a session that was warned a minute ago, so the lock
+                        # follows right away.
+                        pending_body="Your screen time for today is up."
+                    fi
+                    ;;
+            esac
+            if ((new_login == 1)); then
+                # The lock starts over for the new session, and a login in the last minute or past
+                # the limit gets that minute in full, so the warning is not followed by an immediate
+                # lock. The grace period is never cut short, it only runs down with the checks.
+                locked=0
+                lock_confirmed=0
+                if [[ $current == "final" || $current == "up" ]]; then
+                    grace_left=$LOCK_GRACE_SECONDS
+                fi
             fi
-        else
-            # Below the threshold the warnings below are the notification for the login.
-            announced=1
+            stage="$current"
         fi
 
-        if ((remaining == 0)); then
-            # The screen is locked as soon as the limit is reached or the user logs in again, and
-            # after that once per counted minute: unlocking it buys the rest of that minute, no
-            # more. Only the first lock of a series is logged, to keep the journal readable.
+        # At login the service is usually up before the notification daemon of the desktop, so a
+        # message that was not delivered is retried on the following checks.
+        if [[ -n $pending_body ]] && notify "$pending_urgency" "$pending_body"; then
+            pending_body=""
+        fi
+
+        if [[ $stage != "up" ]]; then
+            # There is time left again, after 'cronkid reset' or at midnight.
+            locked=0
+            lock_confirmed=0
+        elif ((grace_left == 0)); then
             if ((locked == 0)); then
+                # Only the first lock of a series is logged, to keep the journal readable.
                 echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
-                notify critical "Your screen time for today is up." || true
                 locked=1
                 lock_confirmed=0
                 lock_sessions
             elif ((minute_done == 1)); then
-                # The next minute is counted, so the screen is locked again anyway and the retries
-                # below stop: a screen locker that does not report the hint has had its chance.
+                # The screen is locked once per counted minute, so unlocking it buys the rest of
+                # that minute, no more. The retries below stop here: a screen locker that does not
+                # report the hint has had its chance.
                 lock_confirmed=1
                 lock_sessions
             elif ((lock_confirmed == 0)); then
+                # loginctl reports success even when nobody locked the screen, and right after a
+                # login the screen locker of the desktop is often not up yet, so the lock is
+                # repeated until a session confirms it.
                 if sessions_locked; then
                     lock_confirmed=1
                 else
-                    # loginctl reports success even when nobody locked the screen, and at login the
-                    # screen locker of the desktop is often not up yet, so the lock is repeated
-                    # until a session confirms it.
                     lock_sessions
                 fi
-            fi
-        else
-            locked=0
-            if ((remaining == 1)); then
-                if ((last_warned == 0)) && notify critical "The screen will be locked in 1 minute."; then
-                    warned=1
-                    last_warned=1
-                fi
-            elif ((remaining <= warn && warned == 0)) && notify normal "Only $(minutes_phrase "$remaining") of screen time left."; then
-                warned=1
             fi
         fi
 
         minute_done=0
         sleep "$CHECK_SECONDS"
         elapsed=$((elapsed + CHECK_SECONDS))
+        grace_left=$((grace_left > CHECK_SECONDS ? grace_left - CHECK_SECONDS : 0))
         if ((elapsed >= TICK_SECONDS)); then
             elapsed=0
             write_used $(($(read_used) + 1))

@@ -54,15 +54,18 @@ Running `setup` again with another limit replaces the previous configuration.
   checks. The used time is stored in the hidden file `~/.cronkid` as `<date> <minutes>`
   (e.g. `2026-09-19 42`).
 - The user is warned by a desktop notification `--warn` minutes before the end (5 by default, or
-  1 minute if the limit itself is not longer than that) and again in the last minute. After logging
-  in the user is notified of the remaining time, or gets the warning right away if the time is
-  almost up. This also happens at a further login, because the service can keep running across
-  logouts, as long as the user's service manager stays up. A notification that cannot be delivered
-  yet, because the desktop is still starting, is retried on the following checks and therefore
-  arrives within seconds of the desktop being ready.
+  1 minute if the limit itself is not longer than that) and again 1 minute before the screen is
+  locked. That last minute is not configurable.
+- Every login is announced as well: with the remaining time, or with the warning about the lock when
+  the time is almost up or already used up. This also happens at a further login, because the service
+  can keep running across logouts, as long as the user's service manager stays up. A notification that
+  cannot be delivered yet, because the desktop is still starting, is retried on the following checks
+  and therefore arrives within seconds of the desktop being ready.
 - When the used time reaches the limit, the service locks the screen of all sessions of the user
-  (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
-  after logging in. After that it is locked again with every counted minute, so unlocking it buys at
+  (`loginctl lock-session`). In a session that is already running this happens right away, because the
+  user was warned a minute earlier. A user who logs in when the limit is already used up, or during
+  the last minute, is warned first and keeps the screen for one more minute to finish what they are
+  doing. After the lock the screen is locked again with every counted minute, so unlocking it buys at
   most the rest of the current minute. `loginctl` reports success even when nobody locked the screen,
   which happens when the screen locker of the desktop is not up yet: the lock is therefore repeated
   every few seconds until a session reports itself as locked, at most until the next counted minute.
@@ -76,6 +79,7 @@ Running `setup` again with another limit replaces the previous configuration.
 ## Known limitations
 
 - The user stays logged in, so the used time keeps counting while the screen is locked.
-- A user who knows their password can unlock the screen. It is locked again within a minute.
+- A user who knows their password can unlock the screen. It is locked again within a minute; only a
+  new login gets the extra minute, unlocking does not.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
   service, run `cronkid reset` or edit the file.
