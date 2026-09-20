@@ -26,6 +26,7 @@ This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessi
 | `cronkid status [--user <username>]`                 | Shows the remaining, used and allowed minutes for today.                     |
 | `cronkid reset [--user <username>]`                  | Resets today's used time to 0.                                               |
 | `cronkid update`                                     | Replaces the installed script with the latest version from GitHub (root).    |
+| `cronkid version`                                    | Shows the version of the installed script: date and time (UTC, without seconds) of the commit it was installed from, and its short commit ID. |
 | `cronkid uninstall`                                  | Removes the script, the control services and the used-time files of all users (root). |
 
 Without `--user`, a command applies to the user who runs it. With `--user`, it applies to the given user and
@@ -62,6 +63,9 @@ Running `setup` again with another limit replaces the previous configuration.
 - When the used time reaches the limit, the service locks the screen of all sessions of the user
   (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
   after logging in. The screen is locked again on every check, so unlocking it does not buy extra time.
+- The version is written into the script while it is installed or updated, because a running script
+  cannot tell which commit it came from. A script run straight from a clone of the repository
+  therefore has no version.
 - The used time is reset automatically every day at midnight: minutes recorded on an earlier date
   count as 0, also after a reboot or while the user is logged in. `cronkid reset` resets it manually.
 

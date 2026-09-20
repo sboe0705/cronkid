@@ -19,6 +19,10 @@ CRONKID_BRANCH="main"
 INSTALL_PATH="/usr/local/bin/cronkid"
 SERVICE_NAME="cronkid.service"
 USED_FILE_NAME=".cronkid"
+# Version of this script: date and time (without seconds) of the commit it was installed from, and
+# the short commit ID. The installer and 'cronkid update' fill this line in, so it is empty in a
+# working copy of the repository.
+CRONKID_VERSION=""
 # Seconds of checks that add one minute of used time.
 TICK_SECONDS=60
 # Seconds between two checks of the control service. The checks are more frequent than a minute of
@@ -48,6 +52,7 @@ Commands:
   reset [--user <username>]
                             reset the used time
   update                    replace this script with the latest version from the origin
+  version                   show the version of this script
   uninstall                 remove the script, all services and all configuration
 
 Without --user, a command applies to the current user. With --user it applies to the given
@@ -108,6 +113,32 @@ origin_url() {
         echo "cronkid: cannot resolve latest commit, falling back to branch '${CRONKID_BRANCH}' (may be up to 5 minutes old)" >&2
         echo "https://raw.githubusercontent.com/${CRONKID_REPO}/${CRONKID_BRANCH}"
     fi
+}
+
+# Prints the version of the commit <1>: its date and time in UTC, without seconds, and the short
+# commit ID, for example "2026-09-20 03:03 UTC b12c9b6". The date of the commit comes from the
+# GitHub API, which is only asked while installing or updating; if that fails, only the ID is used.
+commit_version() {
+    local sha="$1" date
+    date="$(curl -fsSL --retry 2 --connect-timeout 10 \
+        "https://api.github.com/repos/${CRONKID_REPO}/commits/${sha}" 2>/dev/null \
+        | grep -o '"date": *"[0-9-]\{10\}T[0-9:]\{8\}Z"' | head -n 1 \
+        | grep -o '[0-9-]\{10\}T[0-9:]\{5\}' | tr 'T' ' ' || true)"
+    if [[ -n $date ]]; then
+        echo "${date} UTC ${sha:0:7}"
+    else
+        echo "${sha:0:7}"
+    fi
+}
+
+# Writes the version <2> into the CRONKID_VERSION line of the script <1>, which is where
+# 'cronkid version' reads it from. Returns non-zero without touching the file if the version is not
+# plain text or if the script has no such line, as an older version of it has.
+stamp_version() {
+    local file="$1" version="$2"
+    [[ $version =~ ^[0-9A-Za-z\ :-]+$ ]] || return 1
+    grep -q '^CRONKID_VERSION=""$' "$file" || return 1
+    sed -i "s|^CRONKID_VERSION=\"\"\$|CRONKID_VERSION=\"${version}\"|" "$file"
 }
 
 service_dir() {
@@ -443,11 +474,19 @@ cmd_run() {
     done
 }
 
+cmd_version() {
+    if [[ -n $CRONKID_VERSION ]]; then
+        echo "cronkid ${CRONKID_VERSION}"
+    else
+        echo "cronkid: no version, this script was not installed by install.sh or 'cronkid update'"
+    fi
+}
+
 # Downloads the latest script next to the installed one and atomically replaces it. The running
 # script keeps reading the old file, and a failed or invalid download leaves the current version intact.
 cmd_update() {
     require_root update
-    local base url tmp
+    local base url tmp sha version="" suffix=""
     base="$(origin_url)"
     url="${base}/cronkid"
     tmp="$(mktemp "${INSTALL_PATH}.XXXXXX")" || die "cannot create temporary file next to ${INSTALL_PATH}"
@@ -457,6 +496,17 @@ cmd_update() {
     curl -fsSL --retry 3 --connect-timeout 10 "$url" -o "$tmp" \
         || die "download from ${url} failed, keeping current version"
     [[ $(head -c 2 "$tmp") == "#!" ]] || die "downloaded file is not a script, keeping current version"
+    # The origin URL ends in the commit the script comes from, unless it fell back to the branch.
+    # The version is written into the downloaded script, because a running script cannot know which
+    # commit it came from.
+    sha="${base##*/}"
+    if [[ $sha =~ ^[0-9a-f]{40}$ ]]; then
+        version="$(commit_version "$sha")"
+        stamp_version "$tmp" "$version" || version=""
+    fi
+    if [[ -n $version ]]; then
+        suffix=" (version ${version})"
+    fi
     bash -n "$tmp" || die "downloaded script is not valid bash, keeping current version"
     if cmp -s "$tmp" "$INSTALL_PATH"; then
         echo "cronkid: ${INSTALL_PATH} is already up to date"
@@ -464,7 +514,7 @@ cmd_update() {
     fi
     chmod 0755 "$tmp"
     mv -f "$tmp" "$INSTALL_PATH" || die "cannot replace ${INSTALL_PATH}, keeping current version"
-    echo "cronkid: updated ${INSTALL_PATH} from ${base}"
+    echo "cronkid: updated ${INSTALL_PATH} from ${base}${suffix}"
 }
 
 cmd_uninstall() {
@@ -495,6 +545,7 @@ main() {
         reset) cmd_reset "$@" ;;
         run) cmd_run "$@" ;;
         update) cmd_update "$@" ;;
+        version | --version) cmd_version ;;
         uninstall) cmd_uninstall "$@" ;;
         -h | --help | help) usage ;;
         "") usage >&2; exit 1 ;;
