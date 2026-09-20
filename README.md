@@ -50,14 +50,16 @@ Running `setup` again with another limit replaces the previous configuration.
   session ends.
 - Once a minute the service adds one minute to the used time, stored in the hidden file `~/.cronkid`
   as `<date> <minutes>` (e.g. `2026-09-19 42`).
-- When the used time reaches the limit, the service ends all sessions of the user
-  (`loginctl terminate-user`). If the limit is already reached at login, the user is logged out
-  right after logging in.
+- When the used time reaches the limit, the service locks the screen of all sessions of the user
+  (`loginctl lock-session`). If the limit is already reached at login, the screen is locked right
+  after logging in. The screen is locked again on every check, so unlocking it does not buy extra time.
 - The used time is reset automatically every day at midnight: minutes recorded on an earlier date
   count as 0, also after a reboot or while the user is logged in. `cronkid reset` resets it manually.
 
 ## Known limitations
 
-- There is no warning before the user is logged out.
+- There is no warning before the screen is locked.
+- The user stays logged in, so the used time keeps counting while the screen is locked.
+- A user who knows their password can unlock the screen. It is locked again within a minute.
 - The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
   service, run `cronkid reset` or edit the file.

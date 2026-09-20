@@ -290,8 +290,19 @@ cmd_reset() {
     echo "cronkid: used time of user '${USER}' reset"
 }
 
-# Internal command executed by the control service: counts the used minutes and
-# terminates all sessions of the user as soon as the limit is reached.
+# Locks the screen of every session of the user. Sessions that do not support a screen lock,
+# such as the session of the user's service manager, are skipped.
+lock_sessions() {
+    local sessions session
+    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 0
+    # The property holds the session IDs separated by spaces.
+    for session in $sessions; do
+        loginctl lock-session "$session" >/dev/null 2>&1 || true
+    done
+}
+
+# Internal command executed by the control service: counts the used minutes and locks the
+# screen of the user as soon as the limit is reached.
 cmd_run() {
     local limit=""
     if [[ ${1:-} == "--limit" && -n ${2:-} ]]; then
@@ -299,12 +310,20 @@ cmd_run() {
     fi
     [[ $limit =~ ^[1-9][0-9]*$ ]] || die "run requires --limit <minutes>"
 
+    # The screen is locked again on every tick, so that unlocking it does not buy extra time.
+    # Only the first lock of a series is logged, to keep the journal readable.
+    local locked=0
     while true; do
         local used
         used="$(read_used)"
         if ((used >= limit)); then
-            echo "cronkid: limit of ${limit} minutes reached, terminating sessions of user '${USER}'"
-            loginctl terminate-user "$USER"
+            if ((locked == 0)); then
+                echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
+                locked=1
+            fi
+            lock_sessions
+        else
+            locked=0
         fi
         sleep "$TICK_SECONDS"
         write_used $(($(read_used) + 1))
