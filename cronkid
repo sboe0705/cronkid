@@ -7,7 +7,7 @@
 #                 [--warn <minutes>]  configure and start the control service for the given user
 #   cronkid remove --user <username>  stop and remove the control service
 #   cronkid status [--user <username>]  show the remaining time
-#   cronkid reset --user <username>   reset the used time and the automatic logoffs
+#   cronkid reset --user <username>   reset the used time and the automatic locks
 #   cronkid update                    replace this script with the latest version from the origin
 #   cronkid uninstall                 remove the script, all services and all configuration
 #
@@ -37,15 +37,15 @@ TICK_SECONDS=60
 CHECK_SECONDS=5
 # Minutes before the end at which the first warning is shown, unless --warn says otherwise.
 DEFAULT_WARN_MINUTES=5
-# Minutes before the logoff at which the last warning is shown. Unlike the first warning, this one
+# Minutes before the lock at which the last warning is shown. Unlike the first warning, this one
 # is not configurable.
 FINAL_WARN_MINUTES=1
-# Seconds the user may stay after a login that already is in the last minute or past the end. It
-# matches the last warning, which is what the user is told at such a login.
-LOGOFF_GRACE_SECONDS=$((FINAL_WARN_MINUTES * 60))
-# Automatic logoffs per day. The last of them shuts the computer down, and so does every further
+# Seconds the screen stays unlocked after a login or an unlock in the last minute or past the end. It
+# matches the last warning, which is what the user is told then.
+LOCK_GRACE_SECONDS=$((FINAL_WARN_MINUTES * 60))
+# Automatic screen locks per day. The last of them shuts the computer down, and so does every further
 # login until the next day.
-MAX_LOGOFFS=5
+MAX_LOCKS=5
 # Seconds between the shutdown warning and the shutdown.
 SHUTDOWN_WARN_SECONDS=10
 # Seconds the shutdown waits for the desktop to show its warning before the countdown starts anyway.
@@ -65,11 +65,11 @@ Commands:
                             configure and start the control service: the user may use the
                             computer --limit minutes a day and/or only from --from until
                             --until, is warned --warn minutes (default ${DEFAULT_WARN_MINUTES}) and 1 minute
-                            before the end, and is logged off at the end
+                            before the end, and gets the screen locked at the end
   remove --user <username>  stop and remove the control service
   status [--user <username>]
                             show the remaining time
-  reset --user <username>   reset today's used time and automatic logoffs
+  reset --user <username>   reset today's used time and automatic locks
   update                    replace this script with the latest version from the origin
   version                   show the version of this script
   uninstall                 remove the script, all services and all configuration
@@ -175,7 +175,7 @@ read_config() {
     return 0
 }
 
-# Prints the day the automatic logoffs count for. With an allowed period it starts at CFG_FROM, so a
+# Prints the day the automatic locks count for. With an allowed period it starts at CFG_FROM, so a
 # user who is locked out in the evening stays locked out after midnight; without one at midnight.
 period_day() {
     if [[ -n $CFG_FROM ]] && (($(clock_minutes) < $(time_minutes "$CFG_FROM"))); then
@@ -185,19 +185,19 @@ period_day() {
     fi
 }
 
-# Reads the state of the user <1> into USED (minutes used today) and LOGOFFS (automatic logoffs of
-# the current period day). The state file holds "<date> <minutes> <period day> <logoffs>"; values
+# Reads the state of the user <1> into USED (minutes used today) and LOCKS (automatic locks of
+# the current period day). The state file holds "<date> <minutes> <period day> <locks>"; values
 # recorded for another day count as 0, which is the daily reset. Uses CFG_FROM.
 read_state() {
-    local date="" used="" day="" logoffs=""
-    read -r date used day logoffs 2>/dev/null <"$(state_file "$1")" || true
+    local date="" used="" day="" locks=""
+    read -r date used day locks 2>/dev/null <"$(state_file "$1")" || true
     [[ $date == "$(date +%F)" && $used =~ ^[0-9]+$ ]] || used=0
-    [[ $day == "$(period_day)" && $logoffs =~ ^[0-9]+$ ]] || logoffs=0
+    [[ $day == "$(period_day)" && $locks =~ ^[0-9]+$ ]] || locks=0
     USED="$used"
-    LOGOFFS="$logoffs"
+    LOCKS="$locks"
 }
 
-# Writes the used minutes <2> and the automatic logoffs <3> of the user <1> for today. Uses CFG_FROM.
+# Writes the used minutes <2> and the automatic locks <3> of the user <1> for today. Uses CFG_FROM.
 write_state() {
     local file
     file="$(state_file "$1")"
@@ -419,12 +419,12 @@ cmd_status() {
     if [[ -n $CFG_FROM ]]; then
         echo "  allowed from ${CFG_FROM} until ${CFG_UNTIL}"
     fi
-    if ((LOGOFFS >= MAX_LOGOFFS)); then
+    if ((LOCKS >= MAX_LOCKS)); then
         local until="midnight"
         if [[ -n $CFG_FROM ]]; then until="${CFG_FROM}"; fi
         echo "  locked out until ${until}: a login shuts the computer down"
     else
-        echo "  automatic logoffs: ${LOGOFFS} of ${MAX_LOGOFFS}"
+        echo "  automatic locks: ${LOCKS} of ${MAX_LOCKS}"
     fi
 }
 
@@ -435,7 +435,7 @@ cmd_reset() {
     require_root reset "$@"
     read_config "$TARGET_USER" || true
     write_state "$TARGET_USER" 0 0
-    echo "cronkid: used time and automatic logoffs of user '${TARGET_USER}' reset"
+    echo "cronkid: used time and automatic locks of user '${TARGET_USER}' reset"
 }
 
 # Shows a desktop notification in the sessions of the user <1>. Returns non-zero if the message could
@@ -475,8 +475,30 @@ user_sessions() {
     done
 }
 
+# Locks the screen of every session of the user <1>.
+lock_sessions() {
+    local session
+    for session in $(user_sessions "$1"); do
+        loginctl lock-session "$session" >/dev/null 2>&1 || true
+    done
+}
+
+# Returns 0 if a session of the user <1> reports itself as locked. Screen lockers set this hint once
+# they have taken over the screen, which is the only way to notice that a lock request was lost
+# because the locker was not running yet, and that the user unlocked the screen; a locker that does
+# not set the hint is never reported as locked.
+sessions_locked() {
+    local session
+    for session in $(user_sessions "$1"); do
+        if [[ $(loginctl show-session "$session" --property=LockedHint --value 2>/dev/null) == "yes" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Prints the stage of the countdown for <1> remaining minutes with the first warning at <2> minutes:
-# "up" once the time is used up, "final" for the last minute before the logoff, "warn" from the first
+# "up" once the time is used up, "final" for the last minute before the lock, "warn" from the first
 # warning on and "ok" before that. The user is notified once for every stage the countdown enters.
 countdown_stage() {
     local remaining="$1" warn="$2"
@@ -491,20 +513,20 @@ countdown_stage() {
     fi
 }
 
-# Prints the warning for the last minute, given LOGOFFS: the logoff, or the shutdown if it is the
-# last automatic logoff of the day.
+# Prints the warning for the last minute, given LOCKS: the lock, or the shutdown if it is the last
+# automatic lock of the day.
 final_warning() {
-    local next=$((LOGOFFS + 1))
-    if ((next >= MAX_LOGOFFS)); then
+    local next=$((LOCKS + 1))
+    if ((next >= MAX_LOCKS)); then
         echo "The computer will shut down in $(minutes_phrase "$FINAL_WARN_MINUTES")."
     else
-        echo "You will be logged off in $(minutes_phrase "$FINAL_WARN_MINUTES")" \
-            "(automatic logoff ${next} of ${MAX_LOGOFFS}; the last one shuts the computer down)."
+        echo "Your screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")" \
+            "(automatic lock ${next} of ${MAX_LOCKS}; the last one shuts the computer down)."
     fi
 }
 
 # Internal command executed by the control service: counts the used minutes, warns the user before
-# the end, logs them off at the end and shuts the computer down after the last automatic logoff.
+# the end, locks the screen at the end and shuts the computer down after the last automatic lock.
 cmd_run() {
     if [[ ${1:-} == "--limit" ]]; then
         # A user service of an older version. Exiting successfully keeps systemd from restarting it.
@@ -523,15 +545,20 @@ cmd_run() {
     #   stage           the stage of the countdown the user was last notified of
     #   pending_*       the notification that still has to be delivered
     #   seen_sessions   the sessions of the previous check, to recognise a login
-    #   grace_left      seconds until the logoff, granted by a login in the last minute or later
-    #   logged_off      the current login has been counted as an automatic logoff
+    #   grace_left      seconds until the lock, granted by a login or an unlock in the last minute
+    #                   or later
+    #   lock_state      idle         nothing is locked: there is time left, or a grace period runs
+    #                   locking      the lock was sent, no session reports itself as locked yet
+    #                   locked       a session reports the lock, so an unlock can be noticed
+    #                   unconfirmed  no session reported the lock within a minute
     #   shutting_down   the shutdown has been announced
     #   shutdown_wait   seconds left for the desktop to show the shutdown warning
     #   shutdown_left   seconds until the shutdown once the warning is shown, -1 before
     local stage="" pending_urgency="" pending_body="" seen_sessions=" "
-    local grace_left=0 logged_off=0 shutting_down=0 shutdown_wait=0 shutdown_left=-1 elapsed=0
+    local grace_left=0 lock_state="idle" shutting_down=0 shutdown_wait=0 shutdown_left=-1
+    local elapsed=0 minute_done=0
     while true; do
-        local sessions=" " session new_login=0 current pause="$CHECK_SECONDS"
+        local sessions=" " session new_login=0 unlocked=0 current pause="$CHECK_SECONDS"
         # The service runs from boot on, so every session that is new since the last check is a
         # login, including the sessions that already exist at the first check.
         for session in $(user_sessions "$user"); do
@@ -545,8 +572,13 @@ cmd_run() {
         remaining_minutes
         current="$(countdown_stage "$REMAINING" "$warn")"
 
-        if ((new_login == 1)); then
-            logged_off=0
+        # A screen that reported the lock and does not report it any more was unlocked by the user,
+        # who is then treated like someone who just logged in.
+        if [[ $current == "up" && $lock_state == "locked" ]] && ! sessions_locked "$user"; then
+            unlocked=1
+        fi
+        if ((new_login == 1 || unlocked == 1)); then
+            lock_state="idle"
             grace_left=0
         fi
         if ((shutting_down == 1)) && [[ $current != "up" ]]; then
@@ -555,9 +587,9 @@ cmd_run() {
             shutdown_left=-1
         fi
 
-        # Every login and every stage the countdown enters is announced. The message is only queued
-        # here; it is sent below and retried until it arrives.
-        if ((new_login == 1)) || [[ $current != "$stage" ]]; then
+        # Every login, every unlock and every stage the countdown enters is announced. The message is
+        # only queued here; it is sent below and retried until it arrives.
+        if ((new_login == 1 || unlocked == 1)) || [[ $current != "$stage" ]]; then
             pending_urgency="normal"
             pending_body=""
             case "$current" in
@@ -569,53 +601,88 @@ cmd_run() {
                     fi
                     ;;
                 warn)
-                    pending_body="You will be logged off in $(minutes_phrase "$REMAINING")."
+                    pending_body="Your screen will be locked in $(minutes_phrase "$REMAINING")."
                     ;;
                 final)
                     pending_urgency="critical"
                     pending_body="$(final_warning)"
                     ;;
                 up)
-                    # A user who comes back after the end is told about the logoff the grace period
+                    # A user who comes back after the end is told about the lock the grace period
                     # below holds back. A session that was already running was warned a minute ago
-                    # and is logged off right away, and a shutdown brings its own warning.
-                    if ((new_login == 1 && LOGOFFS < MAX_LOGOFFS)); then
+                    # and is locked right away, and a shutdown brings its own warning.
+                    if ((new_login == 1 || unlocked == 1)) && ((LOCKS < MAX_LOCKS)); then
                         pending_urgency="critical"
                         pending_body="$(final_warning)"
                     fi
                     ;;
             esac
-            # Whoever logs in during the last minute or after the end gets the minute they were
-            # just promised.
-            if ((new_login == 1)) && [[ $current == "final" || $current == "up" ]]; then
-                grace_left=$LOGOFF_GRACE_SECONDS
+            # Whoever logs in or unlocks the screen during the last minute or after the end gets the
+            # minute they were just promised.
+            if ((new_login == 1 || unlocked == 1)) && [[ $current == "final" || $current == "up" ]]; then
+                grace_left=$LOCK_GRACE_SECONDS
             fi
             stage="$current"
         fi
 
-        if [[ $stage == "up" && $sessions != " " && $shutting_down -eq 0 ]]; then
-            if ((LOGOFFS >= MAX_LOGOFFS || (grace_left == 0 && LOGOFFS + 1 >= MAX_LOGOFFS))); then
-                # The last automatic logoff, or a login after it: the computer is shut down. The
-                # logoff is counted first, so that a reboot does not end the lockout.
+        if [[ $stage != "up" ]]; then
+            # There is time left again, after 'cronkid reset', at midnight or at the start of the
+            # allowed period.
+            lock_state="idle"
+        elif [[ $sessions != " " && $shutting_down -eq 0 ]]; then
+            if ((LOCKS >= MAX_LOCKS)) || { ((grace_left == 0 && LOCKS + 1 >= MAX_LOCKS)) && [[ $lock_state == "idle" ]]; }; then
+                # The last automatic lock, or a login after it: the computer is shut down. The lock
+                # is counted first, so that a reboot does not end the lockout.
                 shutting_down=1
                 shutdown_wait=$SHUTDOWN_DELIVERY_SECONDS
                 shutdown_left=-1
                 pending_urgency="critical"
                 pending_body="$shutdown_message"
-                if ((LOGOFFS < MAX_LOGOFFS)); then write_state "$user" "$USED" "$MAX_LOGOFFS"; fi
-                echo "cronkid: user '${user}' reached ${MAX_LOGOFFS} automatic logoffs, shutting down in ${SHUTDOWN_WARN_SECONDS} seconds"
+                if ((LOCKS < MAX_LOCKS)); then write_state "$user" "$USED" "$MAX_LOCKS"; fi
+                echo "cronkid: user '${user}' reached ${MAX_LOCKS} automatic locks, shutting down in ${SHUTDOWN_WARN_SECONDS} seconds"
             elif ((grace_left == 0)); then
-                if ((logged_off == 0)); then
-                    logged_off=1
-                    write_state "$user" "$USED" $((LOGOFFS + 1))
-                    if [[ $REASON == "period" ]]; then
-                        echo "cronkid: outside of the allowed period $(period_phrase), logging off user '${user}' (automatic logoff $((LOGOFFS + 1)) of ${MAX_LOGOFFS})"
-                    else
-                        echo "cronkid: limit of ${CFG_LIMIT} minutes reached, logging off user '${user}' (automatic logoff $((LOGOFFS + 1)) of ${MAX_LOGOFFS})"
-                    fi
-                fi
-                # Repeated as long as the sessions are there, but counted once per login.
-                loginctl terminate-user "$user" 2>/dev/null || true
+                case "$lock_state" in
+                    idle)
+                        # Each lock after the end, a login or an unlock is counted, and it is the
+                        # only one of its series that is logged.
+                        write_state "$user" "$USED" $((LOCKS + 1))
+                        if [[ $REASON == "period" ]]; then
+                            echo "cronkid: outside of the allowed period $(period_phrase), locking the screen of user '${user}' (automatic lock $((LOCKS + 1)) of ${MAX_LOCKS})"
+                        else
+                            echo "cronkid: limit of ${CFG_LIMIT} minutes reached, locking the screen of user '${user}' (automatic lock $((LOCKS + 1)) of ${MAX_LOCKS})"
+                        fi
+                        lock_sessions "$user"
+                        lock_state="locking"
+                        ;;
+                    locking)
+                        # loginctl reports success even when nobody locked the screen, and right
+                        # after a login the screen locker of the desktop is often not up yet, so the
+                        # lock is repeated until a session confirms it.
+                        if sessions_locked "$user"; then
+                            lock_state="locked"
+                        else
+                            lock_sessions "$user"
+                            # A locker that does not report the hint has had its chance after a
+                            # minute; repeating the lock on every check would leave no time at all.
+                            if ((minute_done == 1)); then lock_state="unconfirmed"; fi
+                        fi
+                        ;;
+                    locked)
+                        # Nothing to do: the unlock is noticed at the top of the next check.
+                        ;;
+                    unconfirmed)
+                        # Without the hint an unlock cannot be told apart from a lock that was lost,
+                        # so the screen is locked again with every counted minute, as a fallback.
+                        # These locks are not counted, so that a user who just left the locked
+                        # screen is not shut down. A locker that starts reporting the hint later is
+                        # picked up here.
+                        if sessions_locked "$user"; then
+                            lock_state="locked"
+                        elif ((minute_done == 1)); then
+                            lock_sessions "$user"
+                        fi
+                        ;;
+                esac
             fi
         fi
 
@@ -647,13 +714,15 @@ cmd_run() {
             pause=1
         fi
 
+        minute_done=0
         sleep "$pause"
         if [[ $sessions != " " ]]; then
             elapsed=$((elapsed + pause))
             if ((elapsed >= TICK_SECONDS)); then
                 elapsed=0
                 read_state "$user"
-                write_state "$user" $((USED + 1)) "$LOGOFFS"
+                write_state "$user" $((USED + 1)) "$LOCKS"
+                minute_done=1
             fi
         fi
         grace_left=$((grace_left > pause ? grace_left - pause : 0))

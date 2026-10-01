@@ -5,8 +5,8 @@ Guidance for working on this repository.
 ## Project
 
 cronkid is a shell-based (bash) parental control that limits the usage time of Linux users with a
-daily limit and/or an allowed period of the day, logs them off at the end and shuts the computer down
-after the 5th automatic logoff of a day. The used time is stored on disk, so it survives reboots. See `README.md` for user-facing documentation.
+daily limit and/or an allowed period of the day, locks the screen at the end and shuts the computer
+down instead of the 5th automatic lock of a day. The used time is stored on disk, so it survives reboots. See `README.md` for user-facing documentation.
 
 ## Files
 
@@ -46,8 +46,8 @@ Commands (dispatched in `main`, one `cmd_*` function each):
   to `FINAL_WARN_MINUTES` (1).
 - `remove --user <name>` (root): `disable --now`, deletes the config and a legacy user service, keeps the state.
 - `status [--user <name>]`: remaining minutes (`remaining_minutes`), used/limit, period, and the
-  automatic logoffs or the lockout. Without `--user` the current user.
-- `reset --user <name>` (root): writes used time 0 and logoffs 0.
+  automatic locks or the lockout. Without `--user` the current user.
+- `reset --user <name>` (root): writes used time 0 and locks 0.
 - `run --user <name>`: the internal loop the service executes, not listed in the usage text. Called as
   `run --limit ...` by a legacy user unit, it prints a hint and exits 0, so systemd does not restart it.
 
@@ -66,25 +66,34 @@ The loop (`cmd_run`) checks every `CHECK_SECONDS` (5) and is a small state machi
 - `remaining_minutes` takes the smaller of the rest of the limit and the minutes until `UNTIL` (0
   outside the period) and sets `REASON` (`limit`/`period`). `countdown_stage` maps it to `ok`, `warn`
   (from `WARN` minutes left), `final` (the last `FINAL_WARN_MINUTES`, not configurable) and `up`.
-  Entering a stage queues one notification, and so does every login. A login in `final` or `up` gets
-  `final_warning` and `grace_left = LOGOFF_GRACE_SECONDS` (60), which holds the logoff back; a session
-  that was already running is logged off right at the end, because it was warned a minute earlier.
-- In stage `up` with a session: if `LOGOFFS >= MAX_LOGOFFS` (5), or the grace time is over and the
-  next logoff would be the 5th, the shutdown starts: logoffs are written as 5 first (so a reboot does
-  not end the lockout), the 10 s warning is queued, and `SHUTDOWN_WARN_SECONDS` (10) after it was
-  delivered (at most `SHUTDOWN_DELIVERY_SECONDS`, 30, waiting for that) the loop runs
-  `systemctl poweroff -i`, retried after a minute. `notify_others` tells every other logged-in user.
-  During the shutdown the loop checks every second. Time coming back (`reset`) cancels it. Otherwise,
-  once the grace time is over, `loginctl terminate-user` ends all sessions; the logoff is counted once
-  per login (`logged_off`) and the terminate is repeated while sessions remain.
+  Entering a stage queues one notification, and so does every login and every unlock. A login or
+  unlock in `final` or `up` gets `final_warning`, `lock_state=idle` and
+  `grace_left = LOCK_GRACE_SECONDS` (60), which holds the lock back; a session that was already
+  running is locked right at the end, because it was warned a minute earlier. An unlock is a session
+  that no longer reports `LockedHint=yes` while `lock_state` is `locked` (`sessions_locked`).
+- In stage `up` with a session, once the grace time is over: if `LOCKS >= MAX_LOCKS` (5), or
+  `lock_state` is `idle` and the next lock would be the 5th, the shutdown starts: locks are written as 5
+  first (so a reboot does not end the lockout), the 10 s warning is queued, and
+  `SHUTDOWN_WARN_SECONDS` (10) after it was delivered (at most `SHUTDOWN_DELIVERY_SECONDS`, 30, waiting
+  for that) the loop runs `systemctl poweroff -i`, retried after a minute. `notify_others` tells every
+  other logged-in user. During the shutdown the loop checks every second. Time coming back (`reset`)
+  cancels it.
+- Otherwise the lock is driven by `lock_state`: `idle` counts the lock (`write_state` with `LOCKS + 1`),
+  logs the one line of the series, calls `lock_sessions` (`loginctl lock-session` for every ID of
+  `user_sessions`) and goes to `locking`. `locking` repeats the lock on every check until
+  `sessions_locked` confirms it, because `loginctl lock-session` succeeds even when no locker listens;
+  a lock that no session confirms within a counted minute (`minute_done`) ends up in `unconfirmed`,
+  which locks again once per counted minute as a fallback, without counting, so a user who walked away
+  from the locked screen is not shut down. `locked` only watches for the unlock. Leaving stage `up`
+  sets `lock_state` back to `idle`. The user is never logged off.
 - Notifications go through `notify_user`: `runuser -u <user> -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus notify-send`.
   It returns non-zero when the message was not delivered, and the queued message is retried on every
   check until it is; a newer message replaces it. Without sessions the queue is cleared. Without
   `notify-send` it returns 0.
 
-State: `/var/lib/cronkid/<user>` (`STATE_DIR`) holds `<YYYY-MM-DD> <minutes> <period day> <logoffs>` and
+State: `/var/lib/cronkid/<user>` (`STATE_DIR`) holds `<YYYY-MM-DD> <minutes> <period day> <locks>` and
 is written atomically (tmp file + `mv`) by `write_state`. `read_state` sets `USED` (0 when the date is
-not today, the daily reset) and `LOGOFFS` (0 when the period day differs). `period_day` is yesterday
+not today, the daily reset) and `LOCKS` (0 when the period day differs). `period_day` is yesterday
 before `FROM` and today otherwise (always today without a period), so a lockout in the evening lasts
 until `FROM` the next morning. The state is re-read on every check, so `reset` takes effect while the
 service runs.
@@ -132,12 +141,13 @@ Other commands:
 ## Testing
 
 There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the loop without
-root, copy the script with a small `TICK_SECONDS`, `CHECK_SECONDS=1`, short `LOGOFF_GRACE_SECONDS`,
+root, copy the script with a small `TICK_SECONDS`, `CHECK_SECONDS=1`, short `LOCK_GRACE_SECONDS`,
 `SHUTDOWN_WARN_SECONDS` and `SHUTDOWN_DELIVERY_SECONDS`, and `CONFIG_DIR`/`STATE_DIR` in a temporary
 directory, and run `run --user <your own user>` (so `/run/user/<uid>/bus` exists). Put stubs first in
-`PATH`: `loginctl` (`show-user` prints session IDs from a file, `show-session` answers `Class` with `user`
-and `State` with `active`, `terminate-user` logs and empties the file, `list-users` prints
-`<uid> <name> ...` lines), `systemctl` (logs), `runuser` (drops everything up to `--` and execs the rest)
-and `notify-send` (logs). Seeding the state file near the limit or with logoffs reaches the warnings,
-logoffs and the shutdown quickly; writing a new ID into the sessions file is a login. For the period,
+`PATH`: `loginctl` (`show-user` prints session IDs from a file, `show-session` answers `Class` with `user`,
+`State` with `active` and `LockedHint` with `yes` while a `locked` file exists, `lock-session` logs and
+creates that file, `list-users` prints `<uid> <name> ...` lines), `systemctl` (logs), `runuser` (drops everything up to `--` and execs the rest)
+and `notify-send` (logs). Seeding the state file near the limit or with locks reaches the warnings,
+locks and the shutdown quickly; writing a new ID into the sessions file is a login, deleting the
+`locked` file an unlock, and a stub that never reports the hint tests the `unconfirmed` fallback. For the period,
 set `FROM`/`UNTIL` relative to the current time (it uses the real clock).
