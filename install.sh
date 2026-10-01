@@ -93,4 +93,4 @@ bash -n "$tmp"
 install -m 0755 "$tmp" "$INSTALL_PATH"
 
 echo "cronkid installed to ${INSTALL_PATH} from ${CRONKID_URL}${suffix}"
-echo "Next step: log in as the user to be controlled and run 'cronkid setup --limit <minutes>'"
+echo "Next step: run 'sudo cronkid setup --user <username> --limit <minutes> [--from <HH:MM> --until <HH:MM>]'"

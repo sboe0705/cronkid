@@ -1,13 +1,16 @@
 # cronkid
 
-A shell-based parental control for Linux that limits the usage time of configured users.
+A shell-based parental control for Linux that limits the usage time of configured users: a daily
+limit, an allowed period of the day, or both. At the end the user is logged off. A user who keeps
+logging in again is logged off again after a minute, and after the 5th automatic logoff of the day
+the computer shuts down, also at every further login, until the next day.
 The used time is stored on disk, so the limit survives logouts and reboots.
 
 ## Requirements
 
-- Linux with systemd (user services and `loginctl`)
+- Linux with systemd (system services and `loginctl`)
 - `bash`, `curl`, `sudo`
-- `notify-send` (package `libnotify`) for the warnings; without it the screen is locked without warning
+- `notify-send` (package `libnotify`) for the warnings; without it the user is logged off without warning
 
 ## Installation
 
@@ -21,69 +24,65 @@ This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessi
 
 | Command                                              | Description                                                                  |
 |------------------------------------------------------|------------------------------------------------------------------------------|
-| `cronkid setup --limit <minutes> [--warn <minutes>] [--user <username>]`| Configures and enables the control service. It starts immediately if the user is logged in, otherwise at their next login. Running it again replaces the configuration. `--warn` sets how many minutes before the end the first warning is shown (default 5). |
-| `cronkid remove [--user <username>]`                 | Stops and removes the control service. The used time is kept.                |
-| `cronkid status [--user <username>]`                 | Shows the remaining, used and allowed minutes for today.                     |
-| `cronkid reset [--user <username>]`                  | Resets today's used time to 0.                                               |
-| `cronkid update`                                     | Replaces the installed script with the latest version from GitHub (root).    |
+| `cronkid setup --user <username> [--limit <minutes>] [--from <HH:MM> --until <HH:MM>] [--warn <minutes>]` | Configures, enables and starts the control service of the user (root). `--limit` sets the minutes per day, `--from`/`--until` the allowed period of the day; at least one of them is required. `--warn` sets how many minutes before the end the first warning is shown (default 5). Running it again replaces the configuration. |
+| `cronkid remove --user <username>`                   | Stops and removes the control service of the user (root). The used time is kept. |
+| `cronkid status [--user <username>]`                 | Shows the remaining time, the used and allowed minutes, the allowed period and today's automatic logoffs. Works without root; without `--user` it shows the current user. |
+| `cronkid reset --user <username>`                    | Resets today's used time and automatic logoffs to 0, which also lifts a lockout (root). |
+| `cronkid update`                                     | Replaces the installed script with the latest version from GitHub and restarts the control services (root). |
 | `cronkid version`                                    | Shows the version of the installed script: date and time (local time zone, without seconds) of the commit it was installed from, and its short commit ID. |
-| `cronkid uninstall`                                  | Removes the script, the control services and the used-time files of all users (root). |
+| `cronkid uninstall`                                  | Removes the script, the control services, their configuration and state (root). |
 
-Without `--user`, a command applies to the user who runs it. With `--user`, it applies to the given user and
-needs root. `--user`, `update` and `uninstall` call `sudo` automatically when run by a regular user.
+Commands that need root call `sudo` automatically when run by a regular user.
 
 ### Example
 
-As a parent with sudo rights, set up a limit of 2 hours for the user `kid`:
+As a parent with sudo rights, allow the user `kid` 2 hours a day between 8 a.m. and 8 p.m.:
 
 ```bash
-cronkid setup --limit 120 --user kid
+cronkid setup --user kid --limit 120 --from 08:00 --until 20:00
 ```
 
-Or log in as the child's user and run `cronkid setup --limit 120`. Check or reset the child's time with
-`cronkid status --user kid` and `cronkid reset --user kid`.
+Check or reset the child's time with `cronkid status --user kid` and `cronkid reset --user kid`.
 
-Running `setup` again with another limit replaces the previous configuration.
+### Upgrading from a version with the screen lock
+
+Older versions locked the screen and ran as a user service of the child. After `sudo cronkid update`
+that service stops doing anything, so run `cronkid setup --user <name> ...` once again: it removes
+the old service and starts the new one. The used time of the old version is not taken over.
 
 ## How it works
 
-- `setup` writes a systemd **user** service to `~/.config/systemd/user/cronkid.service` and enables it
-  for `default.target`. The service starts automatically when the user logs in and stops when their last
-  session ends.
-- The service checks every few seconds and adds one minute to the used time for every full minute of
-  checks. The used time is stored in the hidden file `~/.cronkid` as `<date> <minutes>`
-  (e.g. `2026-09-19 42`).
+- `setup` writes the configuration to `/etc/cronkid/<user>.conf` and enables the system service
+  `cronkid@<user>.service` (template `/etc/systemd/system/cronkid@.service`). It runs as root from
+  boot on, so the child can neither stop it nor change its configuration or state.
+- The service checks every few seconds and adds one minute to the used time for every full minute in
+  which the user is logged in. The used time is stored in `/var/lib/cronkid/<user>` as
+  `<date> <minutes> <period day> <logoffs>` (e.g. `2026-10-01 42 2026-10-01 0`).
+- The time ends when the limit is used up or the allowed period is over, whichever comes first.
+  Outside the allowed period there is no time at all.
 - The user is warned by a desktop notification `--warn` minutes before the end (5 by default, or
-  1 minute if the limit itself is not longer than that) and again 1 minute before the screen is
-  locked. That last minute is not configurable.
-- Every login is announced as well: with the remaining time, or with the warning about the lock when
-  the time is almost up or already used up. This also happens at a further login, because the service
-  can keep running across logouts, as long as the user's service manager stays up. A notification that
-  cannot be delivered yet, because the desktop is still starting, is retried on the following checks
-  and therefore arrives within seconds of the desktop being ready.
-- When the used time reaches the limit, the service locks the screen of all sessions of the user
-  (`loginctl lock-session`). In a session that is already running this happens right away, because the
-  user was warned a minute earlier. A user who logs in when the limit is already used up, or during
-  the last minute, is warned first and keeps the screen for one more minute to finish what they are
-  doing. Unlocking the screen again gets the same warning and the same minute, after which the screen
-  is locked again.
-- `loginctl` reports success even when nobody locked the screen, which happens when the screen locker
-  of the desktop is not up yet: the lock is therefore repeated every few seconds until a session
-  reports itself as locked. On a desktop whose screen locker never reports the lock, an unlock cannot
-  be told apart from a lock that was lost; there the screen is locked again with every counted minute
-  instead, so unlocking it buys at most the rest of the current minute.
+  1 minute if the limit itself is not longer than that) and again 1 minute before the logoff. That last
+  minute is not configurable.
+- Every login is announced as well: with the remaining time, or with the warning about the logoff when
+  the time is almost up or already over. A notification that cannot be delivered yet, because the
+  desktop is still starting, is retried on the following checks.
+- At the end, all sessions of the user are ended (`loginctl terminate-user`). The user can log in
+  again, is told that they will be logged off in 1 minute, and is logged off after that minute. Each of
+  these logoffs is counted.
+- The 5th automatic logoff of the day shuts the computer down instead, and so does every further
+  login of the user until the next day, also after a reboot. A shutdown is announced 10 seconds in
+  advance, to the child and to every other logged-in user, and is carried out even when other users
+  are logged in. Nothing happens as long as the child does not log in, so others can use the computer.
+- The used time is reset automatically every day at midnight. The automatic logoffs belong to the day
+  of the allowed period, which starts at `--from` (at midnight without a period): a child who is locked
+  out at 9 p.m. is still locked out at 1 a.m. `cronkid reset` resets both.
 - The version is written into the script while it is installed or updated, because a running script
   cannot tell which commit it came from. A script run straight from a clone of the repository
   therefore has no version. It is stored as UTC, because the machine that installs the script is not
   necessarily the one that runs it, and converted to the local time zone when it is shown.
-- The used time is reset automatically every day at midnight: minutes recorded on an earlier date
-  count as 0, also after a reboot or while the user is logged in. `cronkid reset` resets it manually.
 
 ## Known limitations
 
-- The user stays logged in, so the used time keeps counting while the screen is locked.
-- A user who knows their password can unlock the screen. They are warned and locked again a minute
-  later, so the screen time can be stretched in one-minute steps; the lock that keeps coming back is
-  meant to be annoying enough to end the session.
-- The controlled user owns the service and the `~/.cronkid` file. A user who knows how can stop the
-  service, run `cronkid reset` or edit the file.
+- The allowed period is the same every day and cannot cross midnight.
+- The shutdown ends the sessions of other users too; unsaved work in them is lost.
+- Root (and anyone with sudo rights) can change the system clock, the configuration and the state.

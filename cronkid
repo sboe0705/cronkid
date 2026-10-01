@@ -3,12 +3,11 @@
 # cronkid - shell-based parental control that limits the usage time of a user.
 #
 # Usage:
-#   cronkid setup --limit <minutes> [--warn <minutes>] [--user <username>]
-#                                     configure and start the control service for the current
-#                                     or the given user
-#   cronkid remove [--user <username>]  stop and remove the control service
+#   cronkid setup --user <username> [--limit <minutes>] [--from <HH:MM> --until <HH:MM>]
+#                 [--warn <minutes>]  configure and start the control service for the given user
+#   cronkid remove --user <username>  stop and remove the control service
 #   cronkid status [--user <username>]  show the remaining time
-#   cronkid reset [--user <username>]   reset the used time
+#   cronkid reset --user <username>   reset the used time and the automatic logoffs
 #   cronkid update                    replace this script with the latest version from the origin
 #   cronkid uninstall                 remove the script, all services and all configuration
 #
@@ -17,8 +16,15 @@ set -euo pipefail
 CRONKID_REPO="sboe0705/cronkid"
 CRONKID_BRANCH="main"
 INSTALL_PATH="/usr/local/bin/cronkid"
-SERVICE_NAME="cronkid.service"
-USED_FILE_NAME=".cronkid"
+# Configuration (<user>.conf) and state (<user>) of the controlled users. Both are owned by root and
+# readable by everyone, so that the user can see the status but not change it.
+CONFIG_DIR="/etc/cronkid"
+STATE_DIR="/var/lib/cronkid"
+UNIT_PATH="/etc/systemd/system/cronkid@.service"
+# The user service and used-time file of versions before the system service. They are removed by
+# setup, remove and uninstall.
+LEGACY_SERVICE_NAME="cronkid.service"
+LEGACY_USED_FILE_NAME=".cronkid"
 # Version of this script: date and time (without seconds) of the commit it was installed from, and
 # the short commit ID. The installer and 'cronkid update' fill this line in, so it is empty in a
 # working copy of the repository.
@@ -31,12 +37,19 @@ TICK_SECONDS=60
 CHECK_SECONDS=5
 # Minutes before the end at which the first warning is shown, unless --warn says otherwise.
 DEFAULT_WARN_MINUTES=5
-# Minutes before the lock at which the last warning is shown. Unlike the first warning, this one is
-# not configurable.
+# Minutes before the logoff at which the last warning is shown. Unlike the first warning, this one
+# is not configurable.
 FINAL_WARN_MINUTES=1
-# Seconds the screen stays unlocked after a login that already is in the last minute or past the
-# limit. It matches the last warning, which is what the user is told at such a login.
-LOCK_GRACE_SECONDS=$((FINAL_WARN_MINUTES * 60))
+# Seconds the user may stay after a login that already is in the last minute or past the end. It
+# matches the last warning, which is what the user is told at such a login.
+LOGOFF_GRACE_SECONDS=$((FINAL_WARN_MINUTES * 60))
+# Automatic logoffs per day. The last of them shuts the computer down, and so does every further
+# login until the next day.
+MAX_LOGOFFS=5
+# Seconds between the shutdown warning and the shutdown.
+SHUTDOWN_WARN_SECONDS=10
+# Seconds the shutdown waits for the desktop to show its warning before the countdown starts anyway.
+SHUTDOWN_DELIVERY_SECONDS=30
 
 die() {
     echo "cronkid: $*" >&2
@@ -48,21 +61,21 @@ usage() {
 Usage: cronkid <command> [options]
 
 Commands:
-  setup --limit <minutes> [--warn <minutes>] [--user <username>]
-                            configure and start the control service, warning the user
-                            --warn minutes (default ${DEFAULT_WARN_MINUTES}) and 1 minute before the end
-  remove [--user <username>]
-                            stop and remove the control service
+  setup --user <username> [--limit <minutes>] [--from <HH:MM> --until <HH:MM>] [--warn <minutes>]
+                            configure and start the control service: the user may use the
+                            computer --limit minutes a day and/or only from --from until
+                            --until, is warned --warn minutes (default ${DEFAULT_WARN_MINUTES}) and 1 minute
+                            before the end, and is logged off at the end
+  remove --user <username>  stop and remove the control service
   status [--user <username>]
                             show the remaining time
-  reset [--user <username>]
-                            reset the used time
+  reset --user <username>   reset today's used time and automatic logoffs
   update                    replace this script with the latest version from the origin
   version                   show the version of this script
   uninstall                 remove the script, all services and all configuration
 
-Without --user, a command applies to the current user. With --user it applies to the given
-user and requires root (sudo is used automatically).
+setup, remove, reset, update and uninstall require root (sudo is used automatically).
+status without --user shows the status of the current user.
 EOF
 }
 
@@ -73,31 +86,167 @@ require_root() {
     fi
 }
 
-require_non_root() {
-    if [[ $EUID -eq 0 ]]; then
-        die "this command must be run as the user to be controlled, not as root"
+# Parses the "[--user <name>]" option of a command into USER_OPTION.
+parse_user_option() {
+    local cmd="$1"
+    shift
+    USER_OPTION=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user)
+                [[ $# -ge 2 ]] || die "--user requires a value"
+                USER_OPTION="$2"
+                shift 2
+                ;;
+            *) die "unknown option for ${cmd}: $1" ;;
+        esac
+    done
+}
+
+# Validates the user <1>, who must exist and must not be root, and sets TARGET_USER, TARGET_UID and
+# TARGET_HOME. The name is also used in file names, so it may not contain a path.
+check_user() {
+    local user="$1"
+    [[ $user =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid user name: ${user}"
+    getent passwd "$user" >/dev/null || die "unknown user: ${user}"
+    TARGET_USER="$user"
+    TARGET_UID="$(id -u "$user")"
+    [[ $TARGET_UID -ne 0 ]] || die "the root user cannot be controlled"
+    TARGET_HOME="$(getent passwd "$user" | cut -d: -f6)"
+}
+
+# Returns 0 if <1> is a time of day as HH:MM.
+valid_time() {
+    [[ $1 =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
+}
+
+# Prints the minutes since midnight of the time of day <1> (HH:MM).
+time_minutes() {
+    echo $((10#${1%%:*} * 60 + 10#${1##*:}))
+}
+
+# Prints the minutes since midnight of the current time.
+clock_minutes() {
+    time_minutes "$(date +%H:%M)"
+}
+
+# Prints "1 minute" or "<n> minutes".
+minutes_phrase() {
+    if (($1 == 1)); then echo "1 minute"; else echo "${1} minutes"; fi
+}
+
+# Prints the minutes before the end at which the first warning is shown: the given value <2>, or the
+# default if it is empty. A warning that would not fit into the limit <1> is moved to the last
+# minute, where it coincides with the last warning.
+effective_warn() {
+    local limit="$1" warn="${2:-$DEFAULT_WARN_MINUTES}"
+    if [[ -n $limit ]] && ((warn >= limit)); then warn=$FINAL_WARN_MINUTES; fi
+    echo "$warn"
+}
+
+config_file() {
+    echo "${CONFIG_DIR}/${1}.conf"
+}
+
+state_file() {
+    echo "${STATE_DIR}/${1}"
+}
+
+# Reads the configuration of the user <1> into CFG_LIMIT, CFG_FROM, CFG_UNTIL and CFG_WARN, which
+# are empty if not configured. Returns 1 if the user has no configuration. The file is parsed, not
+# sourced, and invalid values are ignored.
+read_config() {
+    local file key value
+    file="$(config_file "$1")"
+    CFG_LIMIT="" CFG_FROM="" CFG_UNTIL="" CFG_WARN=""
+    [[ -f $file ]] || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LIMIT) if [[ $value =~ ^[1-9][0-9]*$ ]]; then CFG_LIMIT="$value"; fi ;;
+            WARN) if [[ $value =~ ^[1-9][0-9]*$ ]]; then CFG_WARN="$value"; fi ;;
+            FROM) if valid_time "$value"; then CFG_FROM="$value"; fi ;;
+            UNTIL) if valid_time "$value"; then CFG_UNTIL="$value"; fi ;;
+        esac
+    done <"$file"
+    # A period is only valid as a whole.
+    if [[ -z $CFG_FROM || -z $CFG_UNTIL ]]; then
+        CFG_FROM="" CFG_UNTIL=""
+    fi
+    return 0
+}
+
+# Prints the day the automatic logoffs count for. With an allowed period it starts at CFG_FROM, so a
+# user who is locked out in the evening stays locked out after midnight; without one at midnight.
+period_day() {
+    if [[ -n $CFG_FROM ]] && (($(clock_minutes) < $(time_minutes "$CFG_FROM"))); then
+        date -d yesterday +%F
+    else
+        date +%F
     fi
 }
 
-used_file() {
-    echo "${HOME}/${USED_FILE_NAME}"
-}
-
-# Prints the used minutes of the current user for today. The used-time file holds
-# "<date> <minutes>"; minutes recorded on another day count as 0 (daily reset).
-read_used() {
-    local file date="" used=""
-    file="$(used_file)"
-    read -r date used 2>/dev/null <"$file" || true
+# Reads the state of the user <1> into USED (minutes used today) and LOGOFFS (automatic logoffs of
+# the current period day). The state file holds "<date> <minutes> <period day> <logoffs>"; values
+# recorded for another day count as 0, which is the daily reset. Uses CFG_FROM.
+read_state() {
+    local date="" used="" day="" logoffs=""
+    read -r date used day logoffs 2>/dev/null <"$(state_file "$1")" || true
     [[ $date == "$(date +%F)" && $used =~ ^[0-9]+$ ]] || used=0
-    echo "$used"
+    [[ $day == "$(period_day)" && $logoffs =~ ^[0-9]+$ ]] || logoffs=0
+    USED="$used"
+    LOGOFFS="$logoffs"
 }
 
-write_used() {
+# Writes the used minutes <2> and the automatic logoffs <3> of the user <1> for today. Uses CFG_FROM.
+write_state() {
     local file
-    file="$(used_file)"
-    echo "$(date +%F) $1" >"${file}.tmp"
+    file="$(state_file "$1")"
+    mkdir -p "$STATE_DIR"
+    echo "$(date +%F) $2 $(period_day) $3" >"${file}.tmp"
+    chmod 0644 "${file}.tmp"
     mv -f "${file}.tmp" "$file"
+}
+
+# Sets REMAINING to the minutes left until the user has to stop, from the used minutes USED and the
+# configuration: the rest of the limit or the time until the end of the allowed period, whichever is
+# smaller, and 0 outside the period. REASON says which of the two ends first: "limit" or "period".
+remaining_minutes() {
+    local rest_limit="" rest_period=""
+    if [[ -n $CFG_LIMIT ]]; then
+        rest_limit=$((CFG_LIMIT > USED ? CFG_LIMIT - USED : 0))
+    fi
+    if [[ -n $CFG_FROM ]]; then
+        local now from until
+        now="$(clock_minutes)"
+        from="$(time_minutes "$CFG_FROM")"
+        until="$(time_minutes "$CFG_UNTIL")"
+        if ((now < from || now >= until)); then
+            rest_period=0
+        else
+            rest_period=$((until - now))
+        fi
+    fi
+    if [[ -z $rest_limit ]] || { [[ -n $rest_period ]] && ((rest_period < rest_limit)); }; then
+        REMAINING="$rest_period"
+        REASON="period"
+    else
+        REMAINING="$rest_limit"
+        REASON="limit"
+    fi
+}
+
+# Prints the allowed period of the configuration as "<from>-<until>".
+period_phrase() {
+    echo "${CFG_FROM}-${CFG_UNTIL}"
+}
+
+# Prints a description of the configuration, e.g. "limit of 120 minutes, allowed 08:00-20:00".
+config_phrase() {
+    local phrase=""
+    if [[ -n $CFG_LIMIT ]]; then phrase="limit of $(minutes_phrase "$CFG_LIMIT")"; fi
+    if [[ -n $CFG_LIMIT && -n $CFG_FROM ]]; then phrase="${phrase}, "; fi
+    if [[ -n $CFG_FROM ]]; then phrase="${phrase}allowed $(period_phrase)"; fi
+    echo "$phrase"
 }
 
 # Prints the base URL to download from. raw.githubusercontent.com caches branch URLs for up to
@@ -147,79 +296,54 @@ stamp_version() {
     sed -i "s|^CRONKID_VERSION=\"\"\$|CRONKID_VERSION=\"${version}\"|" "$file"
 }
 
-service_dir() {
-    echo "${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
-}
-
-# Prints the service unit that enforces the limit <1>, warning the user <2> minutes before the end.
+# Prints the system service template; the instance name is the controlled user. It runs as root from
+# boot on, so the user can neither stop it nor change its files.
 service_unit() {
     cat <<EOF
 [Unit]
-Description=cronkid usage time control (limit: ${1} minutes)
+Description=cronkid usage time control for user %i
+After=systemd-logind.service
 
 [Service]
 Type=simple
-ExecStart=${INSTALL_PATH} run --limit ${1} --warn ${2}
-Restart=on-failure
+ExecStart=${INSTALL_PATH} run --user %i
+Restart=always
+RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 }
 
-# Parses the "[--user <name>]" option of a command into USER_OPTION.
-parse_user_option() {
-    local cmd="$1"
-    shift
-    USER_OPTION=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --user)
-                [[ $# -ge 2 ]] || die "--user requires a value"
-                USER_OPTION="$2"
-                shift 2
-                ;;
-            *) die "unknown option for ${cmd}: $1" ;;
-        esac
-    done
-}
-
-# Usage: for_other_user <user> <command> <original args...>
-# Returns 1 if the command targets the current user (no user given, or the given user is oneself).
-# Otherwise validates the user, re-executes the command via sudo if needed and returns 0 as root
-# with TARGET_USER, TARGET_UID and TARGET_HOME set.
-for_other_user() {
-    local user="$1"
-    shift
-    [[ -n $user ]] || return 1
-    [[ $EUID -ne 0 && $user == "$USER" ]] && return 1
-    getent passwd "$user" >/dev/null || die "unknown user: ${user}"
-    require_root "$@"
-    TARGET_USER="$user"
-    TARGET_UID="$(id -u "$user")"
-    [[ $TARGET_UID -ne 0 ]] || die "the root user cannot be controlled"
-    TARGET_HOME="$(getent passwd "$user" | cut -d: -f6)"
-    [[ -d $TARGET_HOME ]] || die "home directory of user '${user}' not found: ${TARGET_HOME}"
-}
-
-# Runs a cronkid command as the target user, so that root never reads or writes the user's files.
-run_as_target() {
-    runuser -u "$TARGET_USER" -- env -u XDG_CONFIG_HOME HOME="$TARGET_HOME" USER="$TARGET_USER" \
-        LOGNAME="$TARGET_USER" "$(readlink -f "$0")" "$@"
-}
-
-target_user_manager_active() {
-    systemctl is-active --quiet "user@${TARGET_UID}.service"
+# Runs as root. Stops and removes the user service of an older version of cronkid for TARGET_USER,
+# including its 'default.target.wants' symlink, as the target user, so that root never writes
+# through paths the user controls.
+remove_legacy_service() {
+    local dir="${TARGET_HOME}/.config/systemd/user"
+    [[ -e ${dir}/${LEGACY_SERVICE_NAME} || -L ${dir}/default.target.wants/${LEGACY_SERVICE_NAME} ]] || return 0
+    local active=0
+    if systemctl is-active --quiet "user@${TARGET_UID}.service"; then active=1; fi
+    if ((active == 1)); then
+        systemctl --user --machine="${TARGET_USER}@" stop "$LEGACY_SERVICE_NAME" 2>/dev/null || true
+    fi
+    runuser -u "$TARGET_USER" -- rm -f "${dir}/${LEGACY_SERVICE_NAME}" \
+        "${dir}/default.target.wants/${LEGACY_SERVICE_NAME}"
+    if ((active == 1)); then
+        systemctl --user --machine="${TARGET_USER}@" daemon-reload 2>/dev/null || true
+    fi
+    echo "cronkid: removed the user service of an older version for user '${TARGET_USER}'"
 }
 
 cmd_setup() {
-    local args=("$@") limit="" warn="" user=""
+    local args=("$@") limit="" from="" until="" warn="" user=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --limit | --warn | --user)
+            --limit | --from | --until | --warn | --user)
                 [[ $# -ge 2 ]] || die "$1 requires a value"
                 case "$1" in
                     --limit) limit="$2" ;;
+                    --from) from="$2" ;;
+                    --until) until="$2" ;;
                     --warn) warn="$2" ;;
                     *) user="$2" ;;
                 esac
@@ -228,163 +352,131 @@ cmd_setup() {
             *) die "unknown option for setup: $1" ;;
         esac
     done
-    [[ -n $limit ]] || die "setup requires --limit <minutes>"
-    [[ $limit =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive number of minutes"
+    [[ -n $user ]] || die "setup requires --user <username>"
+    [[ -n $limit || -n $from || -n $until ]] || die "setup requires --limit <minutes> and/or --from <HH:MM> --until <HH:MM>"
+    [[ -z $limit || $limit =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive number of minutes"
     [[ -z $warn || $warn =~ ^[1-9][0-9]*$ ]] || die "--warn must be a positive number of minutes"
-    warn="$(effective_warn "$limit" "$warn")"
-
-    if for_other_user "$user" setup "${args[@]}"; then
-        setup_other_user "$limit" "$warn"
-    else
-        setup_current_user "$limit" "$warn"
+    if [[ -n $from || -n $until ]]; then
+        [[ -n $from && -n $until ]] || die "--from and --until must be given together"
+        valid_time "$from" || die "--from must be a time of day as HH:MM"
+        valid_time "$until" || die "--until must be a time of day as HH:MM"
+        (($(time_minutes "$from") < $(time_minutes "$until"))) || die "--from must be earlier than --until"
     fi
-}
+    check_user "$user"
+    require_root setup "${args[@]}"
 
-setup_current_user() {
-    require_non_root
-    local limit="$1" warn="$2" dir
-    dir="$(service_dir)"
-    mkdir -p "$dir"
-    service_unit "$limit" "$warn" >"${dir}/${SERVICE_NAME}"
+    mkdir -p "$CONFIG_DIR"
+    local file
+    file="$(config_file "$user")"
+    {
+        echo "LIMIT=${limit}"
+        echo "FROM=${from}"
+        echo "UNTIL=${until}"
+        echo "WARN=${warn}"
+    } >"${file}.tmp"
+    chmod 0644 "${file}.tmp"
+    mv -f "${file}.tmp" "$file"
+    service_unit >"$UNIT_PATH"
+    remove_legacy_service
 
-    systemctl --user daemon-reload
-    systemctl --user enable "$SERVICE_NAME"
-    systemctl --user restart "$SERVICE_NAME"
-    echo "cronkid: control service configured for user '${USER}' with a limit of ${limit} minutes" \
-        "(first warning at $(minutes_phrase "$warn") left)"
-}
-
-# Runs as root. All files are created as the target user (runuser), so they are owned by that user
-# and root never writes through paths the user controls. Enabling is done by creating the same
-# symlink as 'systemctl --user enable', which also works while the user is logged out.
-setup_other_user() {
-    local limit="$1" warn="$2" dir="${TARGET_HOME}/.config/systemd/user"
-    runuser -u "$TARGET_USER" -- mkdir -p "${dir}/default.target.wants"
-    service_unit "$limit" "$warn" | runuser -u "$TARGET_USER" -- tee "${dir}/${SERVICE_NAME}" >/dev/null
-    runuser -u "$TARGET_USER" -- ln -sfn "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
-
-    if target_user_manager_active; then
-        systemctl --user --machine="${TARGET_USER}@" daemon-reload
-        systemctl --user --machine="${TARGET_USER}@" restart "$SERVICE_NAME"
-        echo "cronkid: control service configured and started for user '${TARGET_USER}'" \
-            "with a limit of ${limit} minutes (first warning at $(minutes_phrase "$warn") left)"
-    else
-        echo "cronkid: control service configured for user '${TARGET_USER}' with a limit of ${limit} minutes" \
-            "(first warning at $(minutes_phrase "$warn") left, starts at the user's next login)"
-    fi
+    systemctl daemon-reload
+    systemctl enable --quiet "cronkid@${user}.service"
+    systemctl restart "cronkid@${user}.service"
+    read_config "$user"
+    echo "cronkid: control service configured and started for user '${user}' ($(config_phrase)," \
+        "first warning at $(minutes_phrase "$(effective_warn "$CFG_LIMIT" "$CFG_WARN")") left)"
 }
 
 cmd_remove() {
     parse_user_option remove "$@"
-    if for_other_user "$USER_OPTION" remove "$@"; then
-        remove_other_user
-        return
-    fi
-    require_non_root
-    local unit
-    unit="$(service_dir)/${SERVICE_NAME}"
-    [[ -f $unit ]] || die "no control service configured for user '${USER}'"
-    systemctl --user disable --now "$SERVICE_NAME"
-    rm -f "$unit"
-    systemctl --user daemon-reload
-    echo "cronkid: control service of user '${USER}' removed"
-}
-
-# Runs as root. Stops the service if the user is logged in and deletes the unit and its
-# 'default.target.wants' symlink as the target user. The used time is kept.
-remove_other_user() {
-    local dir="${TARGET_HOME}/.config/systemd/user"
-    [[ -f ${dir}/${SERVICE_NAME} ]] || die "no control service configured for user '${TARGET_USER}'"
-    if target_user_manager_active; then
-        systemctl --user --machine="${TARGET_USER}@" stop "$SERVICE_NAME" || true
-    fi
-    runuser -u "$TARGET_USER" -- rm -f "${dir}/${SERVICE_NAME}" "${dir}/default.target.wants/${SERVICE_NAME}"
-    if target_user_manager_active; then
-        systemctl --user --machine="${TARGET_USER}@" daemon-reload || true
-    fi
+    [[ -n $USER_OPTION ]] || die "remove requires --user <username>"
+    check_user "$USER_OPTION"
+    require_root remove "$@"
+    local file
+    file="$(config_file "$TARGET_USER")"
+    [[ -f $file ]] || die "no control service configured for user '${TARGET_USER}'"
+    systemctl disable --now --quiet "cronkid@${TARGET_USER}.service" || true
+    rm -f "$file"
+    remove_legacy_service
     echo "cronkid: control service of user '${TARGET_USER}' removed"
-}
-
-# Prints the limit in minutes configured in the user's service, or nothing if there is none.
-read_limit() {
-    local unit
-    unit="$(service_dir)/${SERVICE_NAME}"
-    sed -n 's/^ExecStart=.* --limit \([0-9][0-9]*\).*$/\1/p' "$unit" 2>/dev/null | head -n 1 || true
 }
 
 cmd_status() {
     parse_user_option status "$@"
-    if for_other_user "$USER_OPTION" status "$@"; then
-        run_as_target status
+    local user="${USER_OPTION:-$USER}"
+    [[ $user =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "invalid user name: ${user}"
+    getent passwd "$user" >/dev/null || die "unknown user: ${user}"
+    if ! read_config "$user"; then
+        echo "cronkid: no control service configured for user '${user}'"
         return
     fi
-    require_non_root
-    local limit used
-    limit="$(read_limit)"
-    used="$(read_used)"
-    if [[ -z $limit ]]; then
-        echo "cronkid: no control service configured for user '${USER}' (used today: ${used} minutes)"
-        return
+    read_state "$user"
+    remaining_minutes
+    echo "Remaining time of user '${user}': $(minutes_phrase "$REMAINING")"
+    if [[ -n $CFG_LIMIT ]]; then
+        echo "  used ${USED} of ${CFG_LIMIT} minutes today"
     fi
-    local remaining=$((limit > used ? limit - used : 0))
-    echo "Remaining time of user '${USER}': ${remaining} minutes (used ${used} of ${limit} minutes today)"
+    if [[ -n $CFG_FROM ]]; then
+        echo "  allowed from ${CFG_FROM} until ${CFG_UNTIL}"
+    fi
+    if ((LOGOFFS >= MAX_LOGOFFS)); then
+        local until="midnight"
+        if [[ -n $CFG_FROM ]]; then until="${CFG_FROM}"; fi
+        echo "  locked out until ${until}: a login shuts the computer down"
+    else
+        echo "  automatic logoffs: ${LOGOFFS} of ${MAX_LOGOFFS}"
+    fi
 }
 
 cmd_reset() {
     parse_user_option reset "$@"
-    if for_other_user "$USER_OPTION" reset "$@"; then
-        run_as_target reset
-        return
-    fi
-    require_non_root
-    write_used 0
-    echo "cronkid: used time of user '${USER}' reset"
+    [[ -n $USER_OPTION ]] || die "reset requires --user <username>"
+    check_user "$USER_OPTION"
+    require_root reset "$@"
+    read_config "$TARGET_USER" || true
+    write_state "$TARGET_USER" 0 0
+    echo "cronkid: used time and automatic logoffs of user '${TARGET_USER}' reset"
 }
 
-# Prints "1 minute" or "<n> minutes".
-minutes_phrase() {
-    if (($1 == 1)); then echo "1 minute"; else echo "${1} minutes"; fi
-}
-
-# Prints the minutes before the end at which the first warning is shown: the given value, or the
-# default if it is empty. A warning that would not fit into the limit is moved to the last minute,
-# where it coincides with the last warning.
-effective_warn() {
-    local limit="$1" warn="${2:-$DEFAULT_WARN_MINUTES}"
-    if ((warn >= limit)); then warn=$FINAL_WARN_MINUTES; fi
-    echo "$warn"
-}
-
-# Shows a desktop notification in the user's session. Returns non-zero if the message could not
-# be delivered, for example because the notification daemon of the desktop is not up yet; the
+# Shows a desktop notification in the sessions of the user <1>. Returns non-zero if the message could
+# not be delivered, for example because the notification daemon of the desktop is not up yet; the
 # caller then tries again later. Without notify-send there is nothing to retry, so it returns 0.
-notify() {
-    local urgency="$1" body="$2"
+notify_user() {
+    local user="$1" urgency="$2" body="$3" uid bus
     command -v notify-send >/dev/null 2>&1 || return 0
-    # The service can start before the session has exported the address of its bus.
-    if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then
-        local bus="/run/user/${UID}/bus"
-        [[ -S $bus ]] || return 1
-        export DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}"
-    fi
-    notify-send --app-name=cronkid --urgency="$urgency" "Screen time" "$body" 2>/dev/null
+    uid="$(id -u "$user" 2>/dev/null)" || return 1
+    bus="/run/user/${uid}/bus"
+    [[ -S $bus ]] || return 1
+    runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
+        notify-send --app-name=cronkid --urgency="$urgency" "Screen time" "$body" 2>/dev/null
 }
 
-# Prints the IDs of the user's graphical login sessions, one per line. Only those can show a
-# notification, and an ID that was not there before means the user has logged in again.
-graphical_sessions() {
-    local sessions session type
-    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 0
+# Shows the message <2> once to every logged-in user except <1>.
+notify_others() {
+    local user="$1" body="$2" name
+    while read -r _ name _; do
+        [[ -n $name && $name != "$user" ]] || continue
+        notify_user "$name" critical "$body" || true
+    done < <(loginctl list-users --no-legend 2>/dev/null || true)
+}
+
+# Prints the IDs of the login sessions of the user <1>, one per line: graphical and text logins, but
+# neither the session of the user's service manager nor sessions that are closing after a logout.
+user_sessions() {
+    local sessions session class state
+    sessions="$(loginctl show-user "$1" --property=Sessions --value 2>/dev/null)" || return 0
+    # The property holds the session IDs separated by spaces.
     for session in $sessions; do
-        type="$(loginctl show-session "$session" --property=Type --value 2>/dev/null)" || continue
-        case "$type" in
-            x11 | wayland | mir) echo "$session" ;;
-        esac
+        class="$(loginctl show-session "$session" --property=Class --value 2>/dev/null)" || continue
+        state="$(loginctl show-session "$session" --property=State --value 2>/dev/null)" || continue
+        if [[ $class == user* && $state != "closing" ]]; then
+            echo "$session"
+        fi
     done
 }
 
 # Prints the stage of the countdown for <1> remaining minutes with the first warning at <2> minutes:
-# "up" once the limit is used up, "final" for the last minute before the lock, "warn" from the first
+# "up" once the time is used up, "final" for the last minute before the logoff, "warn" from the first
 # warning on and "ok" before that. The user is notified once for every stage the countdown enters.
 countdown_stage() {
     local remaining="$1" warn="$2"
@@ -399,186 +491,175 @@ countdown_stage() {
     fi
 }
 
-# Locks the screen of every session of the user. Sessions that do not support a screen lock,
-# such as the session of the user's service manager, are skipped.
-lock_sessions() {
-    local sessions session
-    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 0
-    # The property holds the session IDs separated by spaces.
-    for session in $sessions; do
-        loginctl lock-session "$session" >/dev/null 2>&1 || true
-    done
-}
-
-# Returns 0 if a session of the user reports itself as locked. Screen lockers set this hint once they
-# have taken over the screen, which is the only way to notice that a lock request was lost because
-# the locker was not running yet; a locker that does not set the hint is never reported as locked.
-sessions_locked() {
-    local sessions session
-    sessions="$(loginctl show-user "$USER" --property=Sessions --value 2>/dev/null)" || return 1
-    for session in $sessions; do
-        if [[ $(loginctl show-session "$session" --property=LockedHint --value 2>/dev/null) == "yes" ]]; then
-            return 0
-        fi
-    done
-    return 1
+# Prints the warning for the last minute, given LOGOFFS: the logoff, or the shutdown if it is the
+# last automatic logoff of the day.
+final_warning() {
+    local next=$((LOGOFFS + 1))
+    if ((next >= MAX_LOGOFFS)); then
+        echo "The computer will shut down in $(minutes_phrase "$FINAL_WARN_MINUTES")."
+    else
+        echo "You will be logged off in $(minutes_phrase "$FINAL_WARN_MINUTES")" \
+            "(automatic logoff ${next} of ${MAX_LOGOFFS}; the last one shuts the computer down)."
+    fi
 }
 
 # Internal command executed by the control service: counts the used minutes, warns the user before
-# the end and locks the screen once the limit is used up.
+# the end, logs them off at the end and shuts the computer down after the last automatic logoff.
 cmd_run() {
-    local limit="" warn=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --limit | --warn)
-                [[ $# -ge 2 ]] || die "$1 requires a value"
-                if [[ $1 == --limit ]]; then limit="$2"; else warn="$2"; fi
-                shift 2
-                ;;
-            *) die "unknown option for run: $1" ;;
-        esac
-    done
-    [[ $limit =~ ^[1-9][0-9]*$ ]] || die "run requires --limit <minutes>"
-    [[ -z $warn || $warn =~ ^[1-9][0-9]*$ ]] || die "--warn must be a positive number of minutes"
-    # Units written by an older version have no --warn, so the default applies.
-    warn="$(effective_warn "$limit" "$warn")"
-
-    # The message that announces the lock: it goes out in the last minute and whenever the user is
-    # granted that minute anew.
-    local lock_warning="The screen will be locked in $(minutes_phrase "$FINAL_WARN_MINUTES")."
+    if [[ ${1:-} == "--limit" ]]; then
+        # A user service of an older version. Exiting successfully keeps systemd from restarting it.
+        echo "cronkid: this user service is no longer used; run 'sudo cronkid setup --user ${USER} ...'" >&2
+        exit 0
+    fi
+    parse_user_option run "$@"
+    [[ -n $USER_OPTION ]] || die "run requires --user <username>"
+    check_user "$USER_OPTION"
+    local user="$TARGET_USER" warn
+    read_config "$user" || die "no configuration for user '${user}' in ${CONFIG_DIR}"
+    warn="$(effective_warn "$CFG_LIMIT" "$CFG_WARN")"
+    local shutdown_message="The computer will shut down in ${SHUTDOWN_WARN_SECONDS} seconds."
 
     # The state of the loop:
-    #   stage          the stage of the countdown the user was last notified of
-    #   pending_*      the notification that still has to be delivered
-    #   grace_left     seconds until the lock returns, granted by a login or an unlock
-    #   seen_sessions  the graphical sessions of the previous check, to recognise a login
-    #   lock_state     idle         nothing is locked: there is time left, or a grace period runs
-    #                  locking      the lock was sent, no session reports itself as locked yet
-    #                  locked       a session reports the lock, so an unlock can be noticed
-    #                  unconfirmed  no session reported the lock within a minute
-    local stage="" pending_urgency="" pending_body=""
-    local grace_left=0 seen_sessions=" " lock_state="idle"
-    local elapsed=0 minute_done=0
+    #   stage           the stage of the countdown the user was last notified of
+    #   pending_*       the notification that still has to be delivered
+    #   seen_sessions   the sessions of the previous check, to recognise a login
+    #   grace_left      seconds until the logoff, granted by a login in the last minute or later
+    #   logged_off      the current login has been counted as an automatic logoff
+    #   shutting_down   the shutdown has been announced
+    #   shutdown_wait   seconds left for the desktop to show the shutdown warning
+    #   shutdown_left   seconds until the shutdown once the warning is shown, -1 before
+    local stage="" pending_urgency="" pending_body="" seen_sessions=" "
+    local grace_left=0 logged_off=0 shutting_down=0 shutdown_wait=0 shutdown_left=-1 elapsed=0
     while true; do
-        local used remaining current new_login=0 unlocked=0 sessions session
-        used="$(read_used)"
-        remaining=$((limit > used ? limit - used : 0))
-        current="$(countdown_stage "$remaining" "$warn")"
-
-        # The service outlives a single login, because it runs as long as the user's service manager
-        # is up. Every graphical session that is new since the last check is therefore a login, as
-        # is the first check of the service, which the user's first login starts. Sessions that
-        # disappear change nothing, and without a usable loginctl only that first check counts.
-        sessions=" "
-        for session in $(graphical_sessions); do
+        local sessions=" " session new_login=0 current pause="$CHECK_SECONDS"
+        # The service runs from boot on, so every session that is new since the last check is a
+        # login, including the sessions that already exist at the first check.
+        for session in $(user_sessions "$user"); do
             sessions="${sessions}${session} "
             [[ $seen_sessions == *" ${session} "* ]] || new_login=1
         done
         seen_sessions="$sessions"
-        [[ -n $stage ]] || new_login=1
 
-        # A screen that reported the lock and does not report it any more was unlocked by the user,
-        # who is then treated like someone who just logged in.
-        if [[ $current == "up" && $lock_state == "locked" ]] && ! sessions_locked; then
-            unlocked=1
+        # The state is re-read on every check, so that 'cronkid reset' takes effect right away.
+        read_state "$user"
+        remaining_minutes
+        current="$(countdown_stage "$REMAINING" "$warn")"
+
+        if ((new_login == 1)); then
+            logged_off=0
+            grace_left=0
+        fi
+        if ((shutting_down == 1)) && [[ $current != "up" ]]; then
+            # There is time again, after 'cronkid reset' or a new setup.
+            shutting_down=0
+            shutdown_left=-1
         fi
 
-        # Every login, every unlock and every stage the countdown enters is announced. The message
-        # is only queued here; it is sent below and retried until it arrives.
-        if ((new_login == 1 || unlocked == 1)) || [[ $current != "$stage" ]]; then
+        # Every login and every stage the countdown enters is announced. The message is only queued
+        # here; it is sent below and retried until it arrives.
+        if ((new_login == 1)) || [[ $current != "$stage" ]]; then
+            pending_urgency="normal"
+            pending_body=""
             case "$current" in
                 ok)
-                    pending_urgency="normal"
-                    pending_body="$(minutes_phrase "$remaining") of screen time left today."
+                    if [[ $REASON == "period" ]]; then
+                        pending_body="You can use the computer until ${CFG_UNTIL} today ($(minutes_phrase "$REMAINING") left)."
+                    else
+                        pending_body="$(minutes_phrase "$REMAINING") of screen time left today."
+                    fi
                     ;;
                 warn)
-                    pending_urgency="normal"
-                    pending_body="Only $(minutes_phrase "$remaining") of screen time left."
+                    pending_body="You will be logged off in $(minutes_phrase "$REMAINING")."
                     ;;
                 final)
                     pending_urgency="critical"
-                    pending_body="$lock_warning"
+                    pending_body="$(final_warning)"
                     ;;
                 up)
-                    pending_urgency="critical"
-                    if ((new_login == 1 || unlocked == 1)); then
-                        # The user comes back with the limit used up, so they are told about the
-                        # lock the grace period below holds back, as in the last minute.
-                        pending_body="$lock_warning"
-                    else
-                        # The limit ran out in a session that was warned a minute ago, so the lock
-                        # follows right away.
-                        pending_body="Your screen time for today is up."
+                    # A user who comes back after the end is told about the logoff the grace period
+                    # below holds back. A session that was already running was warned a minute ago
+                    # and is logged off right away, and a shutdown brings its own warning.
+                    if ((new_login == 1 && LOGOFFS < MAX_LOGOFFS)); then
+                        pending_urgency="critical"
+                        pending_body="$(final_warning)"
                     fi
                     ;;
             esac
-            if ((new_login == 1 || unlocked == 1)); then
-                # The lock starts over, and whoever logs in during the last minute or with the
-                # limit used up, or unlocks the screen, gets the minute they were just promised.
-                # The grace period is never cut short, it only runs down with the checks.
-                lock_state="idle"
-                if [[ $current == "final" || $current == "up" ]]; then
-                    grace_left=$LOCK_GRACE_SECONDS
-                fi
+            # Whoever logs in during the last minute or after the end gets the minute they were
+            # just promised.
+            if ((new_login == 1)) && [[ $current == "final" || $current == "up" ]]; then
+                grace_left=$LOGOFF_GRACE_SECONDS
             fi
             stage="$current"
         fi
 
-        # At login the service is usually up before the notification daemon of the desktop, so a
-        # message that was not delivered is retried on the following checks.
-        if [[ -n $pending_body ]] && notify "$pending_urgency" "$pending_body"; then
+        if [[ $stage == "up" && $sessions != " " && $shutting_down -eq 0 ]]; then
+            if ((LOGOFFS >= MAX_LOGOFFS || (grace_left == 0 && LOGOFFS + 1 >= MAX_LOGOFFS))); then
+                # The last automatic logoff, or a login after it: the computer is shut down. The
+                # logoff is counted first, so that a reboot does not end the lockout.
+                shutting_down=1
+                shutdown_wait=$SHUTDOWN_DELIVERY_SECONDS
+                shutdown_left=-1
+                pending_urgency="critical"
+                pending_body="$shutdown_message"
+                if ((LOGOFFS < MAX_LOGOFFS)); then write_state "$user" "$USED" "$MAX_LOGOFFS"; fi
+                echo "cronkid: user '${user}' reached ${MAX_LOGOFFS} automatic logoffs, shutting down in ${SHUTDOWN_WARN_SECONDS} seconds"
+            elif ((grace_left == 0)); then
+                if ((logged_off == 0)); then
+                    logged_off=1
+                    write_state "$user" "$USED" $((LOGOFFS + 1))
+                    if [[ $REASON == "period" ]]; then
+                        echo "cronkid: outside of the allowed period $(period_phrase), logging off user '${user}' (automatic logoff $((LOGOFFS + 1)) of ${MAX_LOGOFFS})"
+                    else
+                        echo "cronkid: limit of ${CFG_LIMIT} minutes reached, logging off user '${user}' (automatic logoff $((LOGOFFS + 1)) of ${MAX_LOGOFFS})"
+                    fi
+                fi
+                # Repeated as long as the sessions are there, but counted once per login.
+                loginctl terminate-user "$user" 2>/dev/null || true
+            fi
+        fi
+
+        # Nobody is there to read a message, and the next login brings its own.
+        if [[ $sessions == " " ]]; then
+            pending_body=""
+        fi
+        # At login the service usually notices the session before the notification daemon of the
+        # desktop is up, so a message that was not delivered is retried on the following checks.
+        if [[ -n $pending_body ]] && notify_user "$user" "$pending_urgency" "$pending_body"; then
             pending_body=""
         fi
 
-        if [[ $stage != "up" ]]; then
-            # There is time left again, after 'cronkid reset' or at midnight.
-            lock_state="idle"
-        elif ((grace_left == 0)); then
-            case "$lock_state" in
-                idle)
-                    # The first lock of a series is the only one that is logged, which keeps the
-                    # journal readable while the user unlocks the screen over and over.
-                    echo "cronkid: limit of ${limit} minutes reached, locking the screen of user '${USER}'"
-                    lock_sessions
-                    lock_state="locking"
-                    ;;
-                locking)
-                    # loginctl reports success even when nobody locked the screen, and right after a
-                    # login the screen locker of the desktop is often not up yet, so the lock is
-                    # repeated until a session confirms it.
-                    if sessions_locked; then
-                        lock_state="locked"
-                    else
-                        lock_sessions
-                        # A locker that does not report the hint has had its chance after a minute;
-                        # repeating the lock on every check would leave the user no time at all.
-                        if ((minute_done == 1)); then lock_state="unconfirmed"; fi
-                    fi
-                    ;;
-                locked)
-                    # Nothing to do: the unlock is noticed at the top of the next check.
-                    ;;
-                unconfirmed)
-                    # Without the hint an unlock cannot be told apart from a lock that was lost, so
-                    # the screen is locked again with every counted minute, as a fallback. A locker
-                    # that starts reporting the hint later is picked up here.
-                    if sessions_locked; then
-                        lock_state="locked"
-                    elif ((minute_done == 1)); then
-                        lock_sessions
-                    fi
-                    ;;
-            esac
+        if ((shutting_down == 1)); then
+            if ((shutdown_left < 0)); then
+                # The countdown starts once the user has seen the warning, or after a while if the
+                # desktop does not show it. Other users only get told once.
+                if [[ -z $pending_body ]] || ((shutdown_wait <= 0)); then
+                    shutdown_left=$SHUTDOWN_WARN_SECONDS
+                    notify_others "$user" "$shutdown_message (cronkid: user '${user}' is locked out for today)"
+                fi
+            elif ((shutdown_left == 0)); then
+                echo "cronkid: shutting down"
+                systemctl poweroff -i || true
+                # Tried again a minute later, should the shutdown not have happened.
+                shutdown_left=$TICK_SECONDS
+            fi
+            # The shutdown counts seconds.
+            pause=1
         fi
 
-        minute_done=0
-        sleep "$CHECK_SECONDS"
-        elapsed=$((elapsed + CHECK_SECONDS))
-        grace_left=$((grace_left > CHECK_SECONDS ? grace_left - CHECK_SECONDS : 0))
-        if ((elapsed >= TICK_SECONDS)); then
-            elapsed=0
-            write_used $(($(read_used) + 1))
-            minute_done=1
+        sleep "$pause"
+        if [[ $sessions != " " ]]; then
+            elapsed=$((elapsed + pause))
+            if ((elapsed >= TICK_SECONDS)); then
+                elapsed=0
+                read_state "$user"
+                write_state "$user" $((USED + 1)) "$LOGOFFS"
+            fi
+        fi
+        grace_left=$((grace_left > pause ? grace_left - pause : 0))
+        shutdown_wait=$((shutdown_wait - pause))
+        if ((shutdown_left > 0)); then
+            shutdown_left=$((shutdown_left > pause ? shutdown_left - pause : 0))
         fi
     done
 }
@@ -642,22 +723,33 @@ cmd_update() {
     chmod 0755 "$tmp"
     mv -f "$tmp" "$INSTALL_PATH" || die "cannot replace ${INSTALL_PATH}, keeping current version"
     echo "cronkid: updated ${INSTALL_PATH} from ${base}${suffix}"
+    # The running control services still execute the old script.
+    systemctl try-restart 'cronkid@*.service' 2>/dev/null || true
 }
 
 cmd_uninstall() {
     require_root uninstall
     local name uid home
     while IFS=: read -r name _ uid _ _ home _; do
-        [[ -d $home ]] || continue
-        local unit="${home}/.config/systemd/user/${SERVICE_NAME}"
-        if [[ -f $unit ]]; then
-            systemctl --user --machine="${name}@" stop "$SERVICE_NAME" 2>/dev/null || true
-            rm -f "$unit" "${home}/.config/systemd/user/default.target.wants/${SERVICE_NAME}"
-            systemctl --user --machine="${name}@" daemon-reload 2>/dev/null || true
+        if [[ -f $(config_file "$name") ]] || systemctl is-enabled --quiet "cronkid@${name}.service" 2>/dev/null \
+            || systemctl is-active --quiet "cronkid@${name}.service" 2>/dev/null; then
+            systemctl disable --now --quiet "cronkid@${name}.service" 2>/dev/null || true
             echo "cronkid: removed control service of user '${name}'"
         fi
-        rm -f "${home}/${USED_FILE_NAME}" "${home}/${USED_FILE_NAME}.tmp"
+        [[ -d $home ]] || continue
+        # Leftovers of an older version, which used a user service and a file in the home directory.
+        local unit="${home}/.config/systemd/user/${LEGACY_SERVICE_NAME}"
+        if [[ -f $unit ]]; then
+            systemctl --user --machine="${name}@" stop "$LEGACY_SERVICE_NAME" 2>/dev/null || true
+            rm -f "$unit" "${home}/.config/systemd/user/default.target.wants/${LEGACY_SERVICE_NAME}"
+            systemctl --user --machine="${name}@" daemon-reload 2>/dev/null || true
+            echo "cronkid: removed the user service of an older version for user '${name}'"
+        fi
+        rm -f "${home}/${LEGACY_USED_FILE_NAME}" "${home}/${LEGACY_USED_FILE_NAME}.tmp"
     done < <(getent passwd)
+    rm -f "$UNIT_PATH"
+    systemctl daemon-reload
+    rm -rf "$CONFIG_DIR" "$STATE_DIR"
     rm -f "$INSTALL_PATH"
     echo "cronkid: uninstalled"
 }

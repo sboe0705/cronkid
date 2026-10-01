@@ -4,8 +4,9 @@ Guidance for working on this repository.
 
 ## Project
 
-cronkid is a shell-based (bash) parental control that limits the usage time of Linux users.
-The used time is stored on disk, so it survives reboots. See `README.md` for user-facing documentation.
+cronkid is a shell-based (bash) parental control that limits the usage time of Linux users with a
+daily limit and/or an allowed period of the day, logs them off at the end and shuts the computer down
+after the 5th automatic logoff of a day. The used time is stored on disk, so it survives reboots. See `README.md` for user-facing documentation.
 
 ## Files
 
@@ -25,74 +26,71 @@ only changes after a push to `main` followed by `cronkid update`.
 
 ## Current state of `cronkid`
 
+cronkid runs as a root system service, one instance `cronkid@<user>.service` of the template
+`/etc/systemd/system/cronkid@.service` (`service_unit`: `ExecStart=/usr/local/bin/cronkid run --user %i`,
+`Restart=always`, `WantedBy=multi-user.target`) per controlled user, so the child cannot stop it or change
+its files. The configuration is `/etc/cronkid/<user>.conf` (`CONFIG_DIR`) with the lines `LIMIT=`, `FROM=`,
+`UNTIL=` and `WARN=`; `read_config` parses it into `CFG_*` (never sourced, invalid values ignored, a
+period only as a whole). Config and state are root-owned and 0644, so `status` works without root.
+`check_user` validates a user name (no paths, must exist, not uid 0) and sets `TARGET_USER`, `TARGET_UID`
+and `TARGET_HOME`. Commands that need root re-run themselves through sudo (`require_root`) after the
+options were validated, so errors appear without a password prompt.
+
 Commands (dispatched in `main`, one `cmd_*` function each):
 
-`--user <name>` (setup, remove, status, reset): `for_other_user` returns 1 when no user was given, or when
-the given user is the non-root caller. In that case the command runs for the current user as non-root
-(`require_non_root`). Otherwise it checks that the user exists, re-runs itself through sudo (`require_root`),
-refuses uid 0 and requires the home directory. It then sets `TARGET_USER`, `TARGET_UID` and `TARGET_HOME`.
-remove, status and reset parse their options with `parse_user_option`, which sets `USER_OPTION`; setup
-parses its own. As root, the user's files are never accessed directly. They are touched only via
-`runuser -u <user>`, so the files end up owned by that user and root never follows symlinks the user
-controls. The service is controlled via `systemctl --user --machine=<user>@`, and only if
-`user@<uid>.service` is active. For other users the scripts always use `~/.config`, ignoring
-`XDG_CONFIG_HOME`.
+- `setup --user <name> [--limit <minutes>] [--from HH:MM --until HH:MM] [--warn <minutes>]` (root): at
+  least one of limit or period; `--from` and `--until` together and `FROM < UNTIL` (no period across
+  midnight). Writes the config atomically and the template unit, removes a legacy user service with
+  `remove_legacy_service`, then `daemon-reload`, `enable` and `restart`. `effective_warn` applies
+  `DEFAULT_WARN_MINUTES` (5) when `WARN` is empty and clamps a value that is not smaller than the limit
+  to `FINAL_WARN_MINUTES` (1).
+- `remove --user <name>` (root): `disable --now`, deletes the config and a legacy user service, keeps the state.
+- `status [--user <name>]`: remaining minutes (`remaining_minutes`), used/limit, period, and the
+  automatic logoffs or the lockout. Without `--user` the current user.
+- `reset --user <name>` (root): writes used time 0 and logoffs 0.
+- `run --user <name>`: the internal loop the service executes, not listed in the usage text. Called as
+  `run --limit ...` by a legacy user unit, it prints a hint and exits 0, so systemd does not restart it.
 
-- `setup --limit <minutes> [--warn <minutes>] [--user <name>]`: the unit text comes from `service_unit`
-  (`ExecStart=/usr/local/bin/cronkid run --limit <minutes> --warn <minutes>`, `WantedBy=default.target`).
-  Limit and warning time are stored only in the unit file. `--warn` says how many minutes before the end
-  the first warning is shown; `effective_warn` applies `DEFAULT_WARN_MINUTES` (5) when it is missing and
-  clamps a value that is not smaller than the limit to `FINAL_WARN_MINUTES` (1). `setup_current_user` runs
-  `systemctl --user daemon-reload`, `enable` and `restart`. `setup_other_user` creates the unit and the `default.target.wants` symlink via `runuser`, and
-  runs `daemon-reload` and `restart` if the user is logged in. Otherwise the service starts at the next login.
-- `remove [--user <name>]`: for the current user it runs `disable --now`, deletes the unit and runs
-  `daemon-reload`. `remove_other_user` stops the service if the user is logged in, deletes the unit and
-  symlink via `runuser`, then runs `daemon-reload`. Both keep `~/.cronkid`, so running `setup` again
-  continues from the previous used time.
-- `status [--user <name>]`: prints the remaining minutes as limit minus today's used time, floored at 0.
-  The limit comes from `read_limit`, which parses `--limit N` from the unit's `ExecStart=` (the
-  `--warn N` behind it is ignored). Without a
-  unit file it reports that no service is configured. For another user it re-runs itself as that user
-  through `run_as_target`, which calls `runuser` with `HOME`, `USER` and `LOGNAME` set and `XDG_CONFIG_HOME`
-  unset.
-- `reset [--user <name>]`: writes today's date with `0` to `~/.cronkid`. For another user it uses `run_as_target`.
-- `run --limit <minutes> [--warn <minutes>]`: an internal command that the service executes and that is
-  not listed in the usage text. It loops with `CHECK_SECONDS` (5) between the checks and adds a minute to
-  the used time once the checks add up to `TICK_SECONDS` (60). The checks are that much shorter than a
-  minute so that an undelivered notification and a new login are handled within seconds instead of at
-  the next minute. A unit written before `--warn` existed still works, because the option is optional
-  here. `~/.cronkid` is re-read on every check, so `reset` takes effect while the service runs. The loop
-  is a small state machine:
-  - `countdown_stage` maps the remaining minutes to `ok`, `warn` (from `--warn` minutes left on),
-    `final` (the last `FINAL_WARN_MINUTES`, 1, which is not configurable) and `up` (limit used up).
-    Entering a stage queues one notification, and so does every login and every unlock: each check
-    compares the IDs from `graphical_sessions` (the user's sessions whose `Type` is `x11`, `wayland` or
-    `mir`) with those of the previous check, and an ID that was not there before is a login, as is the
-    first check, which the user's first login starts. Sessions that disappear change nothing, and
-    without a usable `loginctl` only that first check counts as a login. A login therefore always gets a
-    notification: the remaining time in `ok`, the first warning in `warn`, and `lock_warning` in `final`
-    and `up`.
-  - The queued message is sent by `notify` on every check until it was delivered, because at login the
-    service usually runs before the desktop's notification daemon; a newer message replaces one that is
-    still queued. `notify` uses `notify-send` (setting `DBUS_SESSION_BUS_ADDRESS` to `/run/user/<uid>/bus`
-    if it is unset) and returns non-zero when the message was not delivered. Without `notify-send` it
-    returns 0, so nothing is retried.
-  - In stage `up` the screen is locked, driven by `lock_state`: `idle` (nothing locked, or a grace
-    period runs) sends the lock and logs the one line of the series, `locking` repeats it on every check
-    until `sessions_locked` sees `LockedHint=yes` on one of the user's sessions, because
-    `loginctl lock-session` succeeds even when no locker listens and at login the locker is often not up
-    yet. `locked` then only watches: a session that does not report the lock any more was unlocked by
-    the user. A lock that no session confirms within a counted minute ends up in `unconfirmed`, where an
-    unlock cannot be told apart from a lost lock, so the screen is locked again once per counted minute
-    (`minute_done`) as a fallback, and the hint is still checked in case the locker starts reporting it.
-  - A login in stage `final` or `up`, and an unlock, set `lock_state` back to `idle` and `grace_left` to
-    `LOCK_GRACE_SECONDS` (`FINAL_WARN_MINUTES` * 60), which runs down with the checks and holds the lock
-    back that long, so the announced minute is really given; the grace period is never cut short. In a
-    session that was already running, the lock follows the limit right away, because the warning went
-    out a minute earlier. `lock_sessions` reads the session IDs from
-    `loginctl show-user "$USER" --property=Sessions --value` and runs `loginctl lock-session <id>` for
-    each, ignoring sessions that do not support a screen lock (the manager session). The user stays
-    logged in, so the used time keeps counting.
+Legacy: versions before the system service ran a user service `~/.config/systemd/user/cronkid.service`
+and kept the used time in `~/.cronkid`. `remove_legacy_service` stops the unit through
+`systemctl --user --machine=<user>@` (only if `user@<uid>.service` is active) and deletes the unit and
+its `default.target.wants` symlink via `runuser -u <user>`, so root never writes through paths the user
+controls.
+
+The loop (`cmd_run`) checks every `CHECK_SECONDS` (5) and is a small state machine:
+
+- `user_sessions` lists the user's sessions whose `Class` starts with `user` and whose `State` is not
+  `closing` (so neither the manager session nor sessions lingering after a logout). An ID not seen in
+  the previous check is a login; the sessions existing at the first check count as logins too. Used
+  time is added only while a session exists, one minute per `TICK_SECONDS` (60) of checks.
+- `remaining_minutes` takes the smaller of the rest of the limit and the minutes until `UNTIL` (0
+  outside the period) and sets `REASON` (`limit`/`period`). `countdown_stage` maps it to `ok`, `warn`
+  (from `WARN` minutes left), `final` (the last `FINAL_WARN_MINUTES`, not configurable) and `up`.
+  Entering a stage queues one notification, and so does every login. A login in `final` or `up` gets
+  `final_warning` and `grace_left = LOGOFF_GRACE_SECONDS` (60), which holds the logoff back; a session
+  that was already running is logged off right at the end, because it was warned a minute earlier.
+- In stage `up` with a session: if `LOGOFFS >= MAX_LOGOFFS` (5), or the grace time is over and the
+  next logoff would be the 5th, the shutdown starts: logoffs are written as 5 first (so a reboot does
+  not end the lockout), the 10 s warning is queued, and `SHUTDOWN_WARN_SECONDS` (10) after it was
+  delivered (at most `SHUTDOWN_DELIVERY_SECONDS`, 30, waiting for that) the loop runs
+  `systemctl poweroff -i`, retried after a minute. `notify_others` tells every other logged-in user.
+  During the shutdown the loop checks every second. Time coming back (`reset`) cancels it. Otherwise,
+  once the grace time is over, `loginctl terminate-user` ends all sessions; the logoff is counted once
+  per login (`logged_off`) and the terminate is repeated while sessions remain.
+- Notifications go through `notify_user`: `runuser -u <user> -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus notify-send`.
+  It returns non-zero when the message was not delivered, and the queued message is retried on every
+  check until it is; a newer message replaces it. Without sessions the queue is cleared. Without
+  `notify-send` it returns 0.
+
+State: `/var/lib/cronkid/<user>` (`STATE_DIR`) holds `<YYYY-MM-DD> <minutes> <period day> <logoffs>` and
+is written atomically (tmp file + `mv`) by `write_state`. `read_state` sets `USED` (0 when the date is
+not today, the daily reset) and `LOGOFFS` (0 when the period day differs). `period_day` is yesterday
+before `FROM` and today otherwise (always today without a period), so a lockout in the evening lasts
+until `FROM` the next morning. The state is re-read on every check, so `reset` takes effect while the
+service runs.
+
+Other commands:
+
 - `version`: prints `CRONKID_VERSION` through `local_version`, or a note that the script was not
   installed. The variable holds `<YYYY-MM-DD> <HH:MM> UTC <short sha>` and is empty in the repository: `stamp_version` writes it into
   the `CRONKID_VERSION=""` line of the downloaded script during install and `update`, because a running
@@ -109,17 +107,12 @@ controls. The service is controlled via `systemctl --user --machine=<user>@`, an
   branch-URL fallback or `CRONKID_URL` there is no sha and no version.
 - `update` (root, auto-sudo): downloads `cronkid` from `origin_url`, with retries, into a temp file next to
   `/usr/local/bin/cronkid`. It checks that the file starts with `#!`, stamps the version, and passes
-  `bash -n`, skips the update if the file is identical, then does `chmod 0755` and an atomic `mv`. Any failure keeps the
-  current version. The temp file stays in the same directory so that the rename is atomic, the
+  `bash -n`, skips the update if the file is identical, then does `chmod 0755` and an atomic `mv`, and `try-restart`s `cronkid@*.service` so the services
+  run the new code. Any failure keeps the current version. The temp file stays in the same directory so that the rename is atomic, the
   running script keeps its old inode, and the SELinux label is `bin_t`.
-- `uninstall` (root, auto-sudo): for every passwd entry with a home directory, stops and removes the
-  user unit, including its `default.target.wants` symlink, and removes `~/.cronkid`. Then deletes
-  `/usr/local/bin/cronkid`.
-
-State: `~/.cronkid` holds `<YYYY-MM-DD> <minutes>` and is written atomically (tmp file + `mv`).
-`read_used` returns 0 when the stored date is not today, which gives the daily reset. There is no
-separate job for it, and it works across reboots and while the service runs past midnight. A file in the
-old plain-integer format is read as 0.
+- `uninstall` (root, auto-sudo): disables every `cronkid@<user>` that has a config or is enabled or
+  active, removes the legacy user units and `~/.cronkid` of every user, then the template unit,
+  `/etc/cronkid`, `/var/lib/cronkid` and `/usr/local/bin/cronkid`.
 
 ## Workflow
 
@@ -138,11 +131,13 @@ old plain-integer format is read as 0.
 
 ## Testing
 
-There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the counting loop
-without locking the screen, copy the script with `TICK_SECONDS=1`, `CHECK_SECONDS=1` and a short
-`LOCK_GRACE_SECONDS`, put `loginctl` and `notify-send` stubs first in `PATH`, and point `HOME` at a
-temporary directory. Seeding `~/.cronkid` with a used time close to or past the limit is the quickest
-way to reach the warnings and the lock. The `loginctl` stub needs `show-user` (the session IDs),
-`show-session` with `--property=Type` and `--property=LockedHint`, and `lock-session`; letting it read
-the session list and the locked hint from files makes a login testable by writing a new ID into the one,
-and an unlock by having `lock-session` create the other and removing it while the loop runs.
+There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the loop without
+root, copy the script with a small `TICK_SECONDS`, `CHECK_SECONDS=1`, short `LOGOFF_GRACE_SECONDS`,
+`SHUTDOWN_WARN_SECONDS` and `SHUTDOWN_DELIVERY_SECONDS`, and `CONFIG_DIR`/`STATE_DIR` in a temporary
+directory, and run `run --user <your own user>` (so `/run/user/<uid>/bus` exists). Put stubs first in
+`PATH`: `loginctl` (`show-user` prints session IDs from a file, `show-session` answers `Class` with `user`
+and `State` with `active`, `terminate-user` logs and empties the file, `list-users` prints
+`<uid> <name> ...` lines), `systemctl` (logs), `runuser` (drops everything up to `--` and execs the rest)
+and `notify-send` (logs). Seeding the state file near the limit or with logoffs reaches the warnings,
+logoffs and the shutdown quickly; writing a new ID into the sessions file is a login. For the period,
+set `FROM`/`UNTIL` relative to the current time (it uses the real clock).
