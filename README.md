@@ -96,3 +96,7 @@ the old service and starts the new one. The used time of the old version is not 
   noticed: the screen is locked again every minute, but these locks do not count towards the shutdown.
 - The shutdown ends the child's session and those of other users; unsaved work in them is lost.
 - Root (and anyone with sudo rights) can change the system clock, the configuration and the state.
+
+## Support
+
+If this tool is useful to you, you can support its development with a coffee: [buymeacoffee.com/sboe0705](https://buymeacoffee.com/sboe0705) ☕

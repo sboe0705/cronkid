@@ -13,7 +13,7 @@ down instead of the 5th automatic lock of a day. The used time is stored on disk
 - `cronkid`: the main script. It is installed to `/usr/local/bin/cronkid`.
 - `install.sh`: the installer, meant for `curl -fsSL .../install.sh | sudo bash`. It downloads
   `cronkid` from `CRONKID_URL` and installs it.
-- `README.md`: user documentation. `LICENSE`: MIT.
+- `README.md`: user documentation. `LICENSE`: MIT. `.github/FUNDING.yml`: the sponsor button (Buy Me a Coffee).
 
 Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH`). Branch URLs on
 `raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). The GitHub REST API is also cached, for 60 seconds, and is limited to 60 requests per hour
