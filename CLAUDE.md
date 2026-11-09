@@ -137,6 +137,8 @@ Other commands:
   variables under `set -u`. Expand the value when setting the trap, e.g. `trap "rm -f -- $(printf '%q' "$tmp")" EXIT`.
 - `/usr/local/bin` was chosen because it is on `PATH` for all users. Fedora's sudo `secure_path` does
   not include it, so root commands re-exec themselves with `sudo "$(readlink -f "$0")"`.
+- The Buy Me a Coffee link (https://buymeacoffee.com/sboe0705) lives only in the `## Support` section of
+  `README.md` (kept last) and in `.github/FUNDING.yml`; not in the scripts or their output.
 
 ## Testing
 
