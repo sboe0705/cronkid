@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Stub for systemctl. It records every call in $STUB_STATE/systemctl.log and succeeds, except for
+# 'is-active' and 'is-enabled', which only succeed while $STUB_STATE/active.<unit> or
+# $STUB_STATE/enabled.<unit> exists.
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "systemctl $*" >>"${state}/systemctl.log"
+unit="${!#}"
+case "$*" in
+    *is-active*) [[ -e ${state}/active.${unit} ]] || exit 3 ;;
+    *is-enabled*) [[ -e ${state}/enabled.${unit} ]] || exit 1 ;;
+esac
+exit 0

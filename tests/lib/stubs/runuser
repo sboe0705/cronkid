@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# Stub for runuser. The tests run as the controlled user already, so it records the call in
+# $STUB_STATE/runuser.log and runs the command after '--' as it is.
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "runuser $*" >>"${state}/runuser.log"
+while [[ $# -gt 0 && $1 != "--" ]]; do shift; done
+[[ $# -gt 1 ]] || exit 1
+shift
+exec "$@"

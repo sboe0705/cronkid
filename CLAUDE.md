@@ -14,17 +14,31 @@ down instead of the 5th automatic lock of a day. The used time is stored on disk
 - `install.sh`: the installer, meant for `curl -fsSL .../install.sh | sudo bash`. It downloads
   `cronkid` from `CRONKID_URL` and installs it.
 - `README.md`: user documentation. `LICENSE`: MIT. `.github/FUNDING.yml`: the sponsor button (Buy Me a Coffee).
+- `tests/`: the test suite (`tests/run-tests.sh`), see "Testing".
+- `.github/workflows/tests.yml`: job `tests` runs `bash -n`, `shellcheck -x` and the suite on every push
+  and pull request; job `promote` then fast-forwards the branch `stable` to the tested commit, for
+  pushes to `main` only. It never moves `stable` backwards (`git merge-base --is-ancestor`), so a run
+  for an older commit that finishes last leaves it alone.
 
-Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH`). Branch URLs on
+Both scripts download from GitHub (`CRONKID_REPO`, `CRONKID_BRANCH="stable"`, not `main`: `stable` is
+the release channel and only holds commits that passed CI; the README's install URL uses it too). Branch URLs on
 `raw.githubusercontent.com` are cached by the CDN for up to 5 minutes (`max-age=300`). The GitHub REST API is also cached, for 60 seconds, and is limited to 60 requests per hour
 without authentication. So the scripts read the latest commit ID from the uncached git smart-HTTP
 endpoint `https://github.com/<repo>.git/info/refs?service=git-upload-pack` with plain `curl` (`git` is
 not required) and download from the immutable `raw.githubusercontent.com/<repo>/<sha>/` URL. If that
 fails, they fall back to the branch URL. In `cronkid` this lives in `origin_url`. Setting
 `CRONKID_URL` in the environment overrides the origin, for example `file://` for tests. The installed script
-only changes after a push to `main` followed by `cronkid update`.
+only changes after a push to `main`, a green CI run that moves `stable`, and `cronkid update`.
+Installations of versions before `stable` still read `main`; their next `update` gets a script that
+reads `stable`.
 
 ## Current state of `cronkid`
+
+Both scripts run their `main` only when they are executed, not when they are sourced
+(`if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]`; `BASH_SOURCE` is unset when `install.sh` is piped into
+bash), which is how the tests get at single functions. In `install.sh` the whole flow lives in `main`
+and the root check in `require_root`. `RUNTIME_DIR` (`/run/user`) holds the users' session buses and
+exists so the tests can point it elsewhere.
 
 cronkid runs as a root system service, one instance `cronkid@<user>.service` of the template
 `/etc/systemd/system/cronkid@.service` (`service_unit`: `ExecStart=/usr/local/bin/cronkid run --user %i`,
@@ -128,6 +142,11 @@ Other commands:
 - After every change, commit and push directly to `main` (`git push origin main`), unless the user
   asks otherwise. There are no feature branches or PRs.
 - Keep `README.md` and this file in sync with the current state of the scripts in the same commit.
+  `tests/test_docs.sh` checks the easy half of that: every command of `main` appears in the usage
+  text, in `README.md` and here.
+- Every change comes with its tests. `tests/run-tests.sh` and `shellcheck -x cronkid install.sh
+  tests/*.sh tests/lib/*.sh tests/lib/cronkid_cmd tests/lib/stubs/*` have to pass before pushing; CI
+  runs both again and only then moves `stable`. Never push to `stable` by hand.
 
 ## Conventions
 
@@ -142,14 +161,48 @@ Other commands:
 
 ## Testing
 
-There is no test suite yet. Check syntax with `bash -n cronkid install.sh`. To test the loop without
-root, copy the script with a small `TICK_SECONDS`, `CHECK_SECONDS=1`, short `LOCK_GRACE_SECONDS`,
-`SHUTDOWN_WARN_SECONDS` and `SHUTDOWN_DELIVERY_SECONDS`, and `CONFIG_DIR`/`STATE_DIR` in a temporary
-directory, and run `run --user <your own user>` (so `/run/user/<uid>/bus` exists). Put stubs first in
-`PATH`: `loginctl` (`show-user` prints session IDs from a file, `show-session` answers `Class` with `user`,
-`State` with `active` and `LockedHint` with `yes` while a `locked` file exists, `lock-session` logs and
-creates that file, `list-users` prints `<uid> <name> ...` lines), `systemctl` (logs), `runuser` (drops everything up to `--` and execs the rest)
-and `notify-send` (logs). Seeding the state file near the limit or with locks reaches the warnings,
-locks and the shutdown quickly; writing a new ID into the sessions file is a login, deleting the
-`locked` file an unlock, and a stub that never reports the hint tests the `unconfirmed` fallback. For the period,
-set `FROM`/`UNTIL` relative to the current time (it uses the real clock).
+`tests/run-tests.sh` runs the whole suite (about a minute and a half), `tests/run-tests.sh
+tests/test_run_loop.sh` a single file and a second argument only the tests whose name contains it.
+It runs as a regular user, who is the controlled user of every test (cronkid needs a user that
+exists and refuses root). Every test runs in a subshell of its own with a temporary `TEST_TMP`
+(config, state, unit, installed script, runtime directories), a temporary `HOME`, a temporary
+`STUB_STATE` and `tests/lib/stubs` first in `PATH`, so a test never touches the machine and never
+needs a network:
+
+- `loginctl`: `show-user` prints the sessions from `$STUB_STATE/sessions`, `show-session` answers
+  `Class` (default `user`), `State` (default `active`) and `LockedHint` (`yes` while `locked.<id>`
+  exists) from files, `lock-session` logs and, with `locker_active`, creates `locked.<id>`,
+  `list-users` prints the current user and `other_users`.
+- `systemctl` logs; `is-active`/`is-enabled` succeed only while `active.<unit>`/`enabled.<unit>` exist.
+- `runuser` logs and runs the command after `--` as it is. `getent passwd` knows only the current
+  user, with the test's `HOME`, so legacy cleanup never reaches a real home directory.
+- `notify-send` logs `<urgency>|<body>` and fails while `notify_fail` exists. `notify_user` also needs
+  the bus socket, which `create_bus [<uid>]` makes with `python3`.
+
+`tests/lib/harness.sh` has the assertions and a helper for each of these (`set_sessions`,
+`enable_locker`, `unlock_sessions`, `break_notify_send`, `add_logged_in_user`, `write_config`,
+`seed_state`, `stub_curl_output`, ...). A test file sources it, defines `test_*` functions and ends
+with `harness_main "$@"`. `run` calls a command or function in a subshell with `set -e` and keeps
+`status`, `out` and `err`. `run_cronkid` runs a command through `tests/lib/cronkid_cmd`, and
+`load_cronkid` sources the script; both point the paths into `TEST_TMP` (`cronkid_paths`) and replace
+`require_root` with a no-op.
+
+- The loop is driven by `tests/lib/run_loop.sh` (`start_loop`), which sources the script and replaces
+  only `TICK_SECONDS`, `CHECK_SECONDS`, `LOCK_GRACE_SECONDS`, `SHUTDOWN_WARN_SECONDS` and
+  `SHUTDOWN_DELIVERY_SECONDS` (`TEST_*`; 1, 1, 3, 2 and 3 by default). `wait_for` waits for a
+  notification, a lock or a counted minute; a test that shows that something does *not* happen waits
+  `QUIET_SECONDS` and compares counters. Period tests use the real clock (`clock_in <minutes>`) and
+  skip themselves within 30 minutes of midnight.
+- `update` and `install.sh` run against an origin directory served as a `file://` URL (`CRONKID_URL`).
+- `tests/.shellcheckrc` disables the findings that come from tests setting the sourced script's
+  globals and replacing its functions.
+
+Test files: `test_state.sh`, `test_options.sh` (pure functions, config, unit), `test_commands.sh`
+(setup, remove, status, reset, uninstall, legacy service, dispatching), `test_sessions.sh`
+(notifications, sessions, lock), `test_run_loop.sh` (counting, warnings, lock, grace, unlock,
+`unconfirmed`, reset, retries, period, shutdown), `test_version.sh`, `test_update.sh`,
+`test_install.sh` and `test_docs.sh`.
+
+Not covered, because it needs root, a real systemd, a desktop or the network: sudo, the real
+`systemctl`/`loginctl`/`runuser`, the screen locker and the download from GitHub. Test those by hand,
+e.g. with a second user account.

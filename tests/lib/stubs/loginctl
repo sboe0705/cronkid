@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# Stub for loginctl. It reports the sessions and the locked hints that the test wrote into
+# $STUB_STATE and records every call, so that a test can check what cronkid asked for:
+#
+#   $STUB_STATE/sessions        the session IDs of the controlled user, separated by spaces
+#   $STUB_STATE/class.<id>      the class of a session (default: user)
+#   $STUB_STATE/state.<id>      the state of a session (default: active)
+#   $STUB_STATE/locked.<id>     exists while the session reports LockedHint=yes
+#   $STUB_STATE/locker_active   'lock-session' locks for real, like a running screen locker
+#   $STUB_STATE/other_users     further '<uid> <name>' lines of 'list-users'
+#   $STUB_STATE/loginctl_broken every call fails, like a system without a usable loginctl
+#   $STUB_STATE/loginctl.log    every call
+#   $STUB_STATE/locks.log       the sessions of every 'lock-session' call
+#
+set -uo pipefail
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+echo "loginctl $*" >>"${state}/loginctl.log"
+if [[ -e ${state}/loginctl_broken ]]; then
+    echo "stub: loginctl is broken" >&2
+    exit 1
+fi
+
+# Prints the content of the file <1>, or <2> if there is none.
+value_of() {
+    if [[ -f $1 ]]; then cat "$1"; else echo "$2"; fi
+}
+
+case "${1:-}" in
+    show-user)
+        # show-user <user> --property=Sessions --value
+        [[ $* == *--property=Sessions* ]] || exit 1
+        cat "${state}/sessions" 2>/dev/null || true
+        ;;
+    show-session)
+        # show-session <id> --property=Class|State|LockedHint --value
+        session="${2:-}"
+        case "$*" in
+            *--property=Class*) value_of "${state}/class.${session}" user ;;
+            *--property=State*) value_of "${state}/state.${session}" active ;;
+            *--property=LockedHint*)
+                if [[ -e ${state}/locked.${session} ]]; then echo "yes"; else echo "no"; fi
+                ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    lock-session)
+        session="${2:-}"
+        echo "$session" >>"${state}/locks.log"
+        # Without a screen locker the request is lost, exactly as loginctl reports success when
+        # nobody is listening.
+        if [[ -e ${state}/locker_active ]]; then
+            touch "${state}/locked.${session}"
+        fi
+        ;;
+    list-users)
+        echo "$(id -u) ${USER}"
+        cat "${state}/other_users" 2>/dev/null || true
+        ;;
+    *)
+        echo "stub: unsupported loginctl call: $*" >&2
+        exit 1
+        ;;
+esac
+exit 0

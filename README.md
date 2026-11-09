@@ -1,5 +1,7 @@
 # cronkid
 
+[![tests](https://github.com/sboe0705/cronkid/actions/workflows/tests.yml/badge.svg)](https://github.com/sboe0705/cronkid/actions/workflows/tests.yml)
+
 A shell-based parental control for Linux that limits the usage time of configured users: a daily
 limit, an allowed period of the day, or both. At the end the screen is locked; the user stays logged
 in, so nothing is lost. A user who keeps unlocking the screen or logging in again gets it locked again
@@ -16,10 +18,12 @@ The used time is stored on disk, so the limit survives logouts and reboots.
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sboe0705/cronkid/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/sboe0705/cronkid/stable/install.sh | sudo bash
 ```
 
 This installs the `cronkid` script to `/usr/local/bin/cronkid`, which is accessible by all users.
+The installer and `cronkid update` take the script from the branch `stable`, which only receives
+commits that passed the tests (see [Development](#development)).
 
 ## Usage
 
@@ -96,6 +100,28 @@ the old service and starts the new one. The used time of the old version is not 
   noticed: the screen is locked again every minute, but these locks do not count towards the shutdown.
 - The shutdown ends the child's session and those of other users; unsaved work in them is lost.
 - Root (and anyone with sudo rights) can change the system clock, the configuration and the state.
+
+## Development
+
+Changes are pushed to `main`. GitHub Actions runs `bash -n`, `shellcheck` and the test suite on every
+push, and moves the branch `stable` forward to a commit on `main` once it passed. Installations
+only ever download from `stable`, so a broken commit does not reach them.
+
+The test suite is written in bash:
+
+```bash
+tests/run-tests.sh                                     # everything
+tests/run-tests.sh tests/test_run_loop.sh              # one file
+tests/run-tests.sh tests/test_run_loop.sh unlocking    # one file, tests matching 'unlocking'
+```
+
+It needs `bash`, `curl` and `python3` (to create a socket that stands in for the session bus), uses
+`shellcheck` if it is installed, and has to be run as a regular user, who is the controlled user of
+the tests (cronkid refuses to control root). Nothing on the machine is touched: the configuration,
+the state, the service unit and the home directory live in a temporary directory of each test, and
+`loginctl`, `systemctl`, `runuser`, `getent` and `notify-send` are stubs that record what cronkid
+asked of them. The counting loop runs with one second per counted minute, so the whole suite takes
+about a minute and a half.
 
 ## Support
 

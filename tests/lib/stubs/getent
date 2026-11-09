@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Stub for getent. It only knows the user who runs the tests, with the test's HOME as home
+# directory, so that cronkid never looks into a real home directory.
+#
+set -uo pipefail
+
+[[ ${1:-} == "passwd" ]] || exit 1
+line="${USER}:x:$(id -u):$(id -g)::${HOME}:/bin/bash"
+if [[ $# -lt 2 ]]; then
+    echo "$line"
+elif [[ $2 == "$USER" ]]; then
+    echo "$line"
+else
+    exit 2
+fi

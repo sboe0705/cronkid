@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the syntax of the scripts
+        run: bash -n cronkid install.sh
+
+      - name: Run shellcheck
+        run: shellcheck -x cronkid install.sh tests/*.sh tests/lib/*.sh tests/lib/cronkid_cmd tests/lib/stubs/*
+
+      # The suite runs as the unprivileged runner user: cronkid refuses to control root, and no
+      # test needs a systemd, a desktop or a network of its own (they are stubbed).
+      - name: Run the test suite
+        run: tests/run-tests.sh
+
+  # install.sh and 'cronkid update' download from the branch 'stable', so a commit on main only
+  # reaches users once it has passed the tests. stable only ever moves forward: a run for an older
+  # commit that finishes after a newer one leaves it alone.
+  promote:
+    needs: tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-stable
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fast-forward stable to the tested commit
+        run: |
+          if git fetch --quiet origin stable; then
+            if ! git merge-base --is-ancestor FETCH_HEAD "$GITHUB_SHA"; then
+              echo "stable is not an ancestor of ${GITHUB_SHA} (a newer commit was promoted already), leaving it"
+              exit 0
+            fi
+          fi
+          git push origin "${GITHUB_SHA}:refs/heads/stable"

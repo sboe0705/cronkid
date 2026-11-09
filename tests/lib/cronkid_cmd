@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#
+# Runs a cronkid command with the paths of the running test (TEST_TMP) and without sudo: the script
+# is sourced, its paths are pointed into the test's temporary directory and require_root is
+# replaced, then its main runs as usual. The arguments are those of cronkid.
+#
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "${CRONKID:?CRONKID is not set}"
+# shellcheck source-path=SCRIPTDIR source=harness.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/harness.sh"
+set -euo pipefail
+cronkid_paths
+# shellcheck disable=SC2317  # the override is called by the commands
+require_root() { :; }
+
+main "$@"

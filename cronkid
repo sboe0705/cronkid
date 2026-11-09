@@ -14,13 +14,15 @@
 set -euo pipefail
 
 CRONKID_REPO="sboe0705/cronkid"
-CRONKID_BRANCH="main"
+CRONKID_BRANCH="stable"
 INSTALL_PATH="/usr/local/bin/cronkid"
 # Configuration (<user>.conf) and state (<user>) of the controlled users. Both are owned by root and
 # readable by everyone, so that the user can see the status but not change it.
 CONFIG_DIR="/etc/cronkid"
 STATE_DIR="/var/lib/cronkid"
 UNIT_PATH="/etc/systemd/system/cronkid@.service"
+# The runtime directories of the users, /run/user/<uid>, which hold their session bus.
+RUNTIME_DIR="/run/user"
 # The user service and used-time file of versions before the system service. They are removed by
 # setup, remove and uninstall.
 LEGACY_SERVICE_NAME="cronkid.service"
@@ -445,7 +447,7 @@ notify_user() {
     local user="$1" urgency="$2" body="$3" uid bus
     command -v notify-send >/dev/null 2>&1 || return 0
     uid="$(id -u "$user" 2>/dev/null)" || return 1
-    bus="/run/user/${uid}/bus"
+    bus="${RUNTIME_DIR}/${uid}/bus"
     [[ -S $bus ]] || return 1
     runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}" \
         notify-send --app-name=cronkid --urgency="$urgency" "Screen time" "$body" 2>/dev/null
@@ -768,6 +770,7 @@ cmd_update() {
     url="${base}/cronkid"
     tmp="$(mktemp "${INSTALL_PATH}.XXXXXX")" || die "cannot create temporary file next to ${INSTALL_PATH}"
     # The value is expanded now, because the trap runs after this function's locals are gone.
+    # shellcheck disable=SC2064
     trap "rm -f -- $(printf '%q' "$tmp")" EXIT
 
     curl -fsSL --retry 3 --connect-timeout 10 "$url" -o "$tmp" \
@@ -841,4 +844,9 @@ main() {
     esac
 }
 
-main "$@"
+# Running the script executes the command; sourcing it only defines the functions, which is what
+# the test suite does. BASH_SOURCE is unset when the script is read from a pipe, where $0 is the
+# fallback, so that a piped script still runs.
+if [[ ${BASH_SOURCE[0]:-$0} == "$0" ]]; then
+    main "$@"
+fi

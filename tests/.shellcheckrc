@@ -1,0 +1,3 @@
+# The tests source cronkid and set or read its globals (CFG_*, USED, LOCKS, the paths), and replace
+# its functions (require_root), which shellcheck cannot see across the source.
+disable=SC2034,SC2153,SC2329
