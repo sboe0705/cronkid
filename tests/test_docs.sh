@@ -51,9 +51,9 @@ test_every_command_is_in_the_readme() {
 
 test_every_command_is_in_the_development_guide() {
     local guide command
-    guide="$(cat "${REPO_DIR}/CLAUDE.md")"
+    guide="$(cat "${REPO_DIR}/AGENTS.md")"
     for command in $(documented_commands); do
-        assert_contains "$guide" "$command" "CLAUDE.md"
+        assert_contains "$guide" "$command" "AGENTS.md"
     done
 }
 
