@@ -18,7 +18,7 @@ down instead of the 5th automatic lock of a day. The used time is stored on disk
 - `cronkid`: the main script. It is installed to `/usr/local/bin/cronkid`.
 - `install.sh`: the installer, meant for `curl -fsSL .../install.sh | sudo bash`. It downloads
   `cronkid` from `CRONKID_URL` and installs it.
-- `README.md`: user documentation. `LICENSE`: MIT. `.github/FUNDING.yml`: the sponsor button (Buy Me a Coffee).
+- `README.md`: user documentation. `LICENSE`: MIT.
 - `tests/`: the test suite (`tests/run-tests.sh`), see "Testing".
 - `.github/workflows/tests.yml`: job `tests` runs `bash -n`, `shellcheck -x` and the suite on every push
   and pull request; job `promote` then fast-forwards the branch `stable` to the tested commit, for
@@ -161,8 +161,6 @@ Other commands:
   variables under `set -u`. Expand the value when setting the trap, e.g. `trap "rm -f -- $(printf '%q' "$tmp")" EXIT`.
 - `/usr/local/bin` was chosen because it is on `PATH` for all users. Fedora's sudo `secure_path` does
   not include it, so root commands re-exec themselves with `sudo "$(readlink -f "$0")"`.
-- The Buy Me a Coffee link (https://buymeacoffee.com/sboe0705) lives only in the `## Support` section of
-  `README.md` (kept last) and in `.github/FUNDING.yml`; not in the scripts or their output.
 
 ## Testing
 

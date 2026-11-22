@@ -122,7 +122,3 @@ the state, the service unit and the home directory live in a temporary directory
 `loginctl`, `systemctl`, `runuser`, `getent` and `notify-send` are stubs that record what cronkid
 asked of them. The counting loop runs with one second per counted minute, so the whole suite takes
 about a minute and a half.
-
-## Support
-
-If this tool is useful to you, you can support its development with a coffee: [buymeacoffee.com/sboe0705](https://buymeacoffee.com/sboe0705) ☕
